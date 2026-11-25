@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AbuZamel Distribution System - ابوزامل للتجارة والتوزيع</title>
+    <link rel="stylesheet" href="core/style.css">
+    <link rel="manifest" href="core/manifest.json">
+    <link rel="icon" href="core/app-icon.png">
+    <meta name="theme-color" content="#050a1f">
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="core/fontawesome/css/all.min.css">
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="dark-mode"> <!-- Default to Dark Mode for premium feel -->
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-wrapper">
+                    <img src="core/logo.jpg" alt="AbuZamel Logo" class="logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
+                    <div class="logo-placeholder" style="display:none;">أبوزامل</div>
+                </div>
+                <h2 class="brand-name">أبوزامل للتجارة والتوزيع</h2>
+            </div>
+            <nav class="sidebar-nav">
+                <ul>
+                    <li class="nav-item active" data-page="dashboard"><i class="fas fa-chart-line"></i> <span>الرئيسية</span></li>
+                    <li class="nav-item" data-page="pos"><i class="fas fa-cash-register"></i> <span>الكاشير (POS)</span></li>
+                    <li class="nav-item" data-page="products"><i class="fas fa-boxes-stacked"></i> <span>المنتجات</span></li>
+                    <li class="nav-item" data-page="warehouse"><i class="fas fa-warehouse"></i> <span>المخزن</span></li>
+                    <li class="nav-item" data-page="audit"><i class="fas fa-clipboard-check"></i> <span>الجرد</span></li>
+                    <li class="nav-item" data-page="customers"><i class="fas fa-users"></i> <span>العملاء</span></li>
+                    <li class="nav-item" data-page="suppliers"><i class="fas fa-truck"></i> <span>الموردين</span></li>
+                    <li class="nav-item" data-page="agents"><i class="fas fa-user-tie"></i> <span>المناديب</span></li>
+                    <li class="nav-item" data-page="settlement"><i class="fas fa-file-invoice-dollar"></i> <span>تقفيلة المناديب</span></li>
+                    <li class="nav-item" data-page="expenses"><i class="fas fa-file-invoice-dollar"></i> <span>المصاريف</span></li>
+                    <li class="nav-item" data-page="reports"><i class="fas fa-file-contract"></i> <span>التقارير</span></li>
+                    <li class="nav-item" data-page="settings"><i class="fas fa-cog"></i> <span>الإعدادات</span></li>
+                </ul>
+            </nav>
+            <div class="sidebar-footer">
+                <button id="theme-toggle" class="btn-theme"><i class="fas fa-sun"></i> <span>الوضع المضيء</span></button>
+                <div class="dev-credit">بشمهندس زياد سرور</div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="top-bar">
+                <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="القائمة">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <div class="search-bar">
+                    <input type="text" placeholder="بحث سريع..." id="global-search">
+                </div>
+                <div class="user-info">
+                    <div class="notifications">
+                        <i class="fas fa-bell"></i>
+                        <span class="badge" id="alert-count">0</span>
+                    </div>
+                    <div class="user-profile">
+                        <span>المدير Admin</span>
+                        <i class="fas fa-user-circle"></i>
+                    </div>
+                </div>
+            </header>
+
+            <section id="content-area" class="content-area">
+                <!-- Dynamic Content will be loaded here -->
+                <div class="loader-wrapper">
+                    <div class="loader"></div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <!-- External Libraries (must load before app.js) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="core/db.js"></script>
+    <script src="core/app.js"></script>
+
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('./sw.js').catch(err => console.error('SW registration failed', err));
+        });
+      }
+    </script>
+</body>
+</html>

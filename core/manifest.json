@@ -1,0 +1,26 @@
+{
+  "name": "AbuZamel Distribution System",
+  "short_name": "AbuZamel POS",
+  "start_url": "../index.html",
+  "scope": "../",
+  "display": "standalone",
+  "background_color": "#050a1f",
+  "theme_color": "#050a1f",
+  "description": "نظام أبو زامل للتجارة والتوزيع (POS) يعمل أوفلاين على جهاز العميل.",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    {
+      "src": "app-icon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "app-icon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

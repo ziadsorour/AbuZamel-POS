@@ -1,0 +1,58 @@
+`
+        <html>
+        <head>
+            <title>كشف حساب - ${customer.name}</title>
+            <style>
+                body { direction: rtl; font-family: 'Cairo', sans-serif; padding: 20px; }
+                table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+                th, td { border: 1px solid #ddd; padding: 10px; text-align: right; }
+                th { background-color: #f4f4f4; }
+                .header { text-align: center; border-bottom: 2px solid #333; padding-bottom: 10px; }
+                .summary { margin-top: 20px; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>أبوزامل للتجارة والتوزيع</h1>
+                <h2>كشف حساب عميل</h2>
+                <p>العميل: ${customer.name} | الهاتف: ${customer.phone}</p>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>التاريخ</th>
+                        <th>البيان</th>
+                        <th>مدين (عليه)</th>
+                        <th>دائن (له)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${customer.initialBalance ? `
+                        <tr style="background:#f9f9f9; font-weight:bold;">
+                            <td>-</td>
+                            <td>رصيد افتتاحي (سابق)</td>
+                            <td>${customer.initialBalance.toFixed(2)}</td>
+                            <td>-</td>
+                        </tr>
+                    ` : ''}
+                    ${movements.map(m => `
+                        <tr>
+                            <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
+                            <td>${m.desc}</td>
+                            <td>${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
+                            <td>${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+            <div class="summary">
+                <p>الرصيد المتبقي: ${(customer.balance || 0).toFixed(2)} ج.م</p>
+            </div>
+        </body>
+        </html>
+    `
+
+==============
+
+htmlContent) {
+    let iframe = document.getElementById('hidden-print-iframe'

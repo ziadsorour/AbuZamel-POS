@@ -34,6 +34,13 @@ function invProfit(inv) {
     return round2(margin - (Number(inv?.discount) || 0));
 }
 
+// Cash handed back to customers for returned goods on a given local day (optionally for one agent)
+function cashRefundsOn(returns, date, agentId = null) {
+    return round2((returns || [])
+        .filter(r => (Number(r.cashRefund) || 0) > 0 && invDate(r) === date && (agentId === null || r.agentId == agentId))
+        .reduce((s, r) => s + (Number(r.cashRefund) || 0), 0));
+}
+
 function round2(n) {
     return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
@@ -2066,7 +2073,14 @@ async function voidInvoice(id) {
             }
         }
 
-        // 3) Delete Invoice
+        // 3) Delete the invoice's return records too (their stock is already back, and the
+        //    ledger must not keep a return for an invoice that no longer exists)
+        const allReturnsForVoid = await db.getAll('returns');
+        for (const r of allReturnsForVoid.filter(r => r.invoiceId == id)) {
+            await db.delete('returns', r.id);
+        }
+
+        // 4) Delete Invoice
         await db.delete('invoices', id);
         
         showToast('تم حذف الفاتورة واسترجاع المخزون وتعديل الحساب بنجاح');
@@ -2443,7 +2457,17 @@ async function confirmReturn(invoiceId) {
     const reason = document.getElementById('return-reason')?.value || '';
     const returnTotal = round2(returnItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
 
-    if (!confirm(`تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟`)) return;
+    // Split the return: first it cancels the debt THIS invoice created, the rest is cash given back
+    const ownDebtLeft = Math.max(0, round2((Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0)));
+    let custForReturn = inv?.customer?.id ? await db.getById('customers', inv.customer.id) : null;
+    const custBalance = custForReturn ? (Number(custForReturn.balance) || 0) : 0;
+    const debtReduction = round2(Math.min(returnTotal, ownDebtLeft, custForReturn ? custBalance : ownDebtLeft));
+    const cashRefund = round2(returnTotal - debtReduction);
+
+    const confirmMsg = cashRefund > 0
+        ? `تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟\nمنهم ${debtReduction.toFixed(2)} بيتخصموا من دين العميل، و ${cashRefund.toFixed(2)} كاش بيترد للعميل من الدرج.`
+        : `تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟\nكله بيتخصم من دين العميل.`;
+    if (!confirm(confirmMsg)) return;
 
     const confirmBtn = document.getElementById('return-confirm-btn');
     if (confirmBtn) confirmBtn.disabled = true;
@@ -2457,6 +2481,8 @@ async function confirmReturn(invoiceId) {
         agentId: inv?.agentId || null,
         items: returnItems,
         total: returnTotal,
+        debtReduction,
+        cashRefund,
         reason,
         createdAt: new Date().toISOString()
     });
@@ -2483,7 +2509,7 @@ async function confirmReturn(invoiceId) {
         const c = await db.getById('customers', custId);
         if (c) {
             const current = Number(c.balance) || 0;
-            c.balance = round2(Math.max(0, current - returnTotal));
+            c.balance = round2(Math.max(0, current - debtReduction));
             await db.update('customers', c);
         }
     }
@@ -2502,13 +2528,13 @@ async function confirmReturn(invoiceId) {
     }
     inv.total = round2(Math.max(0, (Number(inv.total) || 0) - returnTotal));
     // Keep the invoice's remaining debt in step with the return so a later void reverts the right amount
-    inv.remaining = round2(Math.max(0, (Number(inv.remaining) || 0) - returnTotal));
+    inv.remaining = round2(Math.max(0, (Number(inv.remaining) || 0) - debtReduction));
     // Adjust subtotal to maintain accuracy if reprinted
     inv.subTotal = round2(Math.max(0, (Number(inv.subTotal) || 0) - returnTotal));
     await db.update('invoices', inv);
 
     closeReturnModal();
-    alert(`تم تسجيل المرتجع #${returnId} بنجاح\nوتم تعديل الفاتورة الأصلية لضبط المبيعات والدرج تلقائياً`);
+    alert(`تم تسجيل المرتجع #${returnId} بنجاح\nوتم تعديل الفاتورة الأصلية لضبط المبيعات تلقائياً` + (cashRefund > 0 ? `\nرد كاش للعميل: ${cashRefund.toFixed(2)} (اتسجل في الدرج وتقفيلة المندوب)` : ''));
     
     // Refresh Reports UI to reflect updated invoice total
     if (typeof loadPage === 'function' && state.currentPage === 'reports') {
@@ -3545,6 +3571,7 @@ async function handleFactoryReset() {
 async function renderSettlement() {
     const agents = await db.getAll('agents');
     const invoices = await db.getAll('invoices');
+    const returns = await db.getAll('returns');
     const today = new Date().toLocaleDateString('en-CA');
     const dayClosures = await db.getAll('dayClosures');
     const isClosed = (dayClosures || []).some(c => c?.date === today);
@@ -3560,7 +3587,7 @@ async function renderSettlement() {
         </div>
 
         <div id="settlement-stats-container">
-            ${renderSettlementStats(agents, invoices, today)}
+            ${renderSettlementStats(agents, invoices, today, returns)}
         </div>
 
         <div id="settlement-entry-container">
@@ -3584,7 +3611,7 @@ async function renderSettlement() {
                     </tr>
                 </thead>
                 <tbody id="settlement-table-body">
-                    ${renderSettlementRows(agents, invoices, today)}
+                    ${renderSettlementRows(agents, invoices, today, returns)}
                 </tbody>
             </table>
         </div>
@@ -3609,9 +3636,10 @@ async function closeDay() {
     renderSettlement();
 }
 
-function sumPaidForAgent(invoices, agentId, date) {
+function sumPaidForAgent(invoices, agentId, date, returns = []) {
     const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && invDate(inv) === date);
-    return round2(dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0));
+    // Cash collected on invoices that day, minus cash given back for returns that day
+    return round2(dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0) - cashRefundsOn(returns, date, agentId));
 }
 
 function renderSettlementEntryCard(agents, invoices, date) {
@@ -3671,7 +3699,8 @@ async function recalcSettlementDiff() {
     }
 
     const invoices = await db.getAll('invoices');
-    const expected = sumPaidForAgent(invoices, agentId, date);
+    const returns = await db.getAll('returns');
+    const expected = sumPaidForAgent(invoices, agentId, date, returns);
     expectedEl.value = expected.toFixed(2);
 
     const diff = round2(received - expected); // + زيادة / - عجز
@@ -3694,7 +3723,8 @@ async function saveAgentSettlement() {
     if (!agentId) return alert('اختر المندوب');
 
     const invoices = await db.getAll('invoices');
-    const expected = sumPaidForAgent(invoices, agentId, date);
+    const returns = await db.getAll('returns');
+    const expected = sumPaidForAgent(invoices, agentId, date, returns);
     const diff = round2(received - expected);
     const status = Math.abs(diff) < 0.005 ? 'ok' : diff < 0 ? 'shortage' : 'surplus';
 
@@ -3715,10 +3745,11 @@ async function saveAgentSettlement() {
 
 // sumPaidForAgent defined above (L3559)
 
-function renderSettlementStats(agents, invoices, date) {
+function renderSettlementStats(agents, invoices, date, returns = []) {
     const todayInvoices = invoices.filter(inv => invDate(inv) === date);
     const totalSales = todayInvoices.reduce((sum, inv) => sum + invSales(inv), 0);
-    const totalPaid = todayInvoices.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
+    const cashRefunds = cashRefundsOn(returns, date);
+    const totalPaid = round2(todayInvoices.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0) - cashRefunds);
     const totalRemaining = todayInvoices.reduce((sum, inv) => sum + invOwnRemaining(inv), 0);
 
     return `
@@ -3730,7 +3761,7 @@ function renderSettlementStats(agents, invoices, date) {
     `;
 }
 
-function renderSettlementRows(agents, invoices, date) {
+function renderSettlementRows(agents, invoices, date, returns = []) {
     const todayInvoices = invoices.filter(inv => invDate(inv) === date);
     
     const agentSales = {};
@@ -3743,6 +3774,8 @@ function renderSettlementRows(agents, invoices, date) {
             agentSales[id].paid += (Number(inv.paid) || 0);
         }
     });
+    // Cash returned to customers that day comes off the agent's cash to hand in
+    agents.forEach(a => { agentSales[a.id].paid = round2(agentSales[a.id].paid - cashRefundsOn(returns, date, a.id)); });
 
     const rowsAsArray = agents.map(a => `
         <tr>
@@ -4145,9 +4178,9 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
             date: r.date,
             type: 'مرتجع مبيعات',
             id: r.id,
-            debit: 0,
+            debit: Number(r.cashRefund) || 0, // cash handed back to the customer
             credit: Number(r.total) || 0,
-            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`,
+            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})` + ((Number(r.cashRefund) || 0) > 0 ? ` - رد كاش ${(Number(r.cashRefund)).toFixed(2)}` : ''),
             originalType: 'return'
         }))
     ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
@@ -4427,6 +4460,7 @@ async function recalculateCustomerBalance(customerId) {
 
         custReturns.forEach(r => {
             credit += (Number(r.total) || 0);
+            debit += (Number(r.cashRefund) || 0);
         });
 
         const newBalance = Math.max(0, round2(debit - credit));
@@ -4809,7 +4843,7 @@ async function printCustomerStatement(customerId) {
         ...custPayments.map(p => p.direction === 'out'
             ? ({ date: p.date, desc: p.note || 'نقد صادر', debit: Number(p.amount) || 0, credit: 0 })
             : ({ date: p.date, desc: p.note || 'دفعة سداد', debit: 0, credit: Number(p.amount) || 0 })),
-        ...custReturns.map(r => ({ date: r.date, desc: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`, debit: 0, credit: Number(r.total) || 0 }))
+        ...custReturns.map(r => ({ date: r.date, desc: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`, debit: Number(r.cashRefund) || 0, credit: Number(r.total) || 0 }))
     ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     executeHiddenPrint(`

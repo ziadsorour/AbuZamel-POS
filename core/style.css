@@ -1431,3 +1431,120 @@ body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }
     .pay-full { flex: 1 1 100%; min-height: 54px; border: 0; border-radius: 12px; background: #16a34a; color: #fff; font-family: inherit; font-size: 1.15rem; font-weight: 800; }
     .pay-more { background: none; border: 0; color: var(--text-muted); font-family: inherit; padding: 8px 0; }
 }
+
+/* ===================== Calm phone look (simple, quiet, big) ===================== */
+@media (max-width: 768px) {
+    :root { --bg-dark:#ffffff; --sidebar-dark:#ffffff; --card-dark:#ffffff; --text-dark:#1f2937; --text-muted:#7b8494; --border-dark:#eceff3; --soft:#f4f6f9; --ink:#2563eb; --primary:#2563eb; }
+    body.light-mode { --bg-dark:#ffffff; --sidebar-dark:#ffffff; --card-dark:#ffffff; --text-dark:#1f2937; --border-dark:#eceff3; }
+    body.dark-mode { --bg-dark:#12151c; --sidebar-dark:#12151c; --card-dark:#12151c; --text-dark:#eef1f6; --text-muted:#8c95a5; --border-dark:#222834; --soft:#1b202a; }
+    html { font-size: 17px; }
+    body, .app-container, .main-content { background: var(--bg-dark); color: var(--text-dark); }
+    /* top bar: nothing but the menu */
+    .top-bar { background: var(--bg-dark); border: 0; box-shadow: none; min-height: 52px; height: auto; padding: 6px 12px; }
+    .top-bar .search-bar, .top-bar .notifications { display: none !important; }
+    .user-profile span, .user-profile > i { display: none; }
+    .user-profile { background: none; border: 0; }
+    .mobile-menu-btn { background: var(--soft); border: 0; border-radius: 12px; width: 44px; height: 44px; color: var(--text-dark); }
+    /* flat surfaces: no cards in cards, no borders, no shadows */
+    .card, .stat-card, .chart-card, .alerts-card, .modal-content { background: transparent !important; border: 0 !important; box-shadow: none !important; backdrop-filter: none !important; }
+    .card { padding: 0 !important; margin-bottom: 14px; }
+    #content-area { padding: 8px 18px 90px; }
+    .page-header h2 { font-size: 1.6rem; font-weight: 800; }
+    .page-header { margin-bottom: 14px; }
+    /* secondary actions hidden */
+    .az-secondary, .page-header .btn-export, .chart-card, .charts-row .chart-card { display: none !important; }
+    .charts-row { display: block; }
+    /* buttons: one calm primary */
+    .btn { border-radius: 14px; box-shadow: none; }
+    .btn-new, .btn-save, .page-header .btn { background: var(--ink); border: 0; color: #fff; }
+    .page-header .btn { min-height: 52px; font-size: 1.05rem; font-weight: 700; width: 100%; justify-content: center; }
+    /* inputs */
+    input, select, textarea { background: var(--soft) !important; border: 0 !important; border-radius: 14px !important; color: var(--text-dark) !important; font-size: 17px; }
+    input[type=search], .search-input, .az-tfilter { height: 50px; padding: 0 16px; }
+    ::placeholder { color: var(--text-muted); }
+    /* dashboard: big numbers, nothing else */
+    .stats-grid, .stat-grid, .dashboard-stats { grid-template-columns: 1fr 1fr !important; gap: 22px 12px !important; }
+    .stat-card { padding: 4px 0 !important; text-align: right; }
+    .stat-card .stat-icon, .stat-card .icon, .stat-card > i, .stat-card .stat-icon-wrap { display: none !important; }
+    .stat-card h3, .stat-card .stat-title, .stat-card p, .stat-card span { color: var(--text-muted); font-size: 0.95rem; font-weight: 500; }
+    .stat-card h2, .stat-card .stat-value, .stat-card h1 { font-size: 1.9rem; font-weight: 800; color: var(--text-dark); }
+    /* lists: quiet rows with a hairline, details on tap */
+    table.az-compact tr.az-row { background: transparent !important; border: 0; border-bottom: 1px solid var(--border-dark); border-radius: 0; padding: 14px 2px; margin: 0; gap: 4px 12px; }
+    table.az-compact tr.az-row.open { background: var(--soft) !important; border-radius: 14px; padding: 14px 12px; border-bottom-color: transparent; }
+    table.az-compact td.az-title { font-size: 1.1rem; font-weight: 700; }
+    table.az-compact td.az-key { font-size: 1.05rem; color: var(--text-dark); font-weight: 700; }
+    table.az-compact td.az-key::before { font-size: 0.72rem; font-weight: 400; color: var(--text-muted); }
+    table.az-compact td.az-key { flex-direction: row-reverse; }
+    table.az-compact td.az-act { flex-wrap: wrap; }
+    table.az-compact tr.az-row.open td.az-act button, table.az-compact tr.az-row.open td.az-act .btn { flex: 1 1 40% !important; }
+    table.az-compact td.az-sub { display: none; }
+    table.az-compact tr.az-row.open td.az-sub { display: inline-flex; }
+    table.az-compact td.az-act { display: none; order: 6; flex: 1 1 100%; gap: 10px; margin-top: 10px; }
+    table.az-compact tr.az-row.open td.az-act { display: flex; }
+    table.az-compact tr.az-row.open td.az-act button, table.az-compact tr.az-row.open td.az-act .btn { font-size: 0.95rem !important; width: auto !important; flex: 1 1 0 !important; min-height: 46px !important; padding: 0 12px !important; border-radius: 12px !important; background: var(--bg-dark) !important; color: var(--text-dark) !important; border: 0 !important; gap: 6px; }
+    table.az-compact tr.az-row.open td.az-act button i { font-size: 1rem !important; }
+    table.az-compact tr.az-row.open td.az-act .btn-delete, table.az-compact tr.az-row.open td.az-act button[title="حذف"] { color: #dc2626 !important; }
+    table.az-compact tr.az-row.open td.az-act button[title="تسجيل دفعة"] { background: var(--ink) !important; color: #fff !important; }
+    table.az-compact td.az-more { border-top: 0 !important; color: var(--text-muted); }
+    table .low-stock-row, tr.low-stock-row { background: transparent !important; }
+    tr.low-stock-row td.az-key:last-of-type { color: #dc2626; }
+    .az-tools { background: var(--bg-dark); }
+    .az-count { display: none; }
+    .az-more-btn { background: var(--soft) !important; color: var(--text-dark) !important; }
+    /* bottom nav: quiet */
+    .bottom-nav { background: var(--bg-dark); border-top: 1px solid var(--border-dark); box-shadow: none; height: 64px; }
+    .bottom-nav button { color: var(--text-muted); background: none; }
+    .bottom-nav button.active { color: var(--ink); background: none; }
+    .bottom-nav button span { font-size: 0.78rem; }
+    /* "more" menu */
+    .sidebar { background: var(--bg-dark) !important; border: 0; box-shadow: 0 0 40px rgba(0,0,0,0.15); }
+    .sidebar-header { border: 0; }
+    .sidebar-nav li, .nav-item { font-size: 1.15rem; min-height: 56px; border-radius: 14px; background: none !important; color: var(--text-dark); }
+    .nav-item.active { background: var(--soft) !important; color: var(--ink); font-weight: 700; }
+    .nav-item i { color: var(--text-muted); width: 28px; }
+    .btn-theme { background: var(--soft); color: var(--text-dark); border: 0; border-radius: 14px; }
+    /* quick sale */
+    .qs-chip { background: var(--soft); border: 0; color: var(--text-dark); }
+    .qs-chip.on { background: var(--ink); color: #fff; }
+    .qs-chip-more { background: none; border: 1px dashed var(--border-dark); }
+    .qs-hint, .qs-empty { border: 0; background: none; padding: 26px 10px; font-size: 1.05rem; }
+    .qs-line { background: transparent; border: 0; border-bottom: 1px solid var(--border-dark); border-radius: 0; padding: 12px 2px; }
+    .ql-price { border: 0; background: var(--soft); color: var(--text-dark); }
+    .ql-price.changed { background: #fff4e0; color: #b45309; }
+    .ql-qty button { background: var(--soft); border: 0; }
+    .qs-tile { background: var(--soft); border: 0; color: var(--text-dark); min-height: 92px; border-radius: 18px; }
+    .qs-tile:active { background: #dbe7ff; }
+    .qs-tp { color: var(--text-muted); font-weight: 600; font-size: 0.9rem; }
+    .qs-bar { background: var(--bg-dark); border-top: 1px solid var(--border-dark); box-shadow: none; }
+    .qs-total small { color: var(--text-muted); }
+    .qs-cash { background: var(--ink); }
+    .qs-credit { background: var(--soft); color: var(--text-dark); }
+    .qs-panel { background: var(--bg-dark); }
+    .qs-backdrop { background: rgba(15,20,30,0.45); }
+    .qs-row { background: var(--soft); border: 0; }
+    .qs-new { background: #e8f0ff; color: var(--ink); }
+    .qs-ok, .qs-ok.cash, .qs-ok.credit { background: var(--ink); }
+    .qs-find input, .qs-big-input, .qs-part input { background: var(--soft) !important; border: 0 !important; }
+    /* forms & sheets */
+    #product-modal .modal-footer, #customer-modal .modal-footer { background: var(--bg-dark); border-top: 1px solid var(--border-dark); }
+    .modal { background: rgba(15,20,30,0.45); }
+    .modal-content { background: var(--bg-dark) !important; }
+    .input-group label { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 6px; }
+    .btn-cancel, .modal-footer .btn:not(.btn-save) { background: var(--soft); color: var(--text-dark); border: 0; }
+    #payment-modal-global > div { background: var(--bg-dark) !important; color: var(--text-dark) !important; }
+    .pay-full { background: var(--ink); }
+    .pay-bal b { color: #dc2626; }
+    /* login */
+    #login-overlay { background: var(--bg-dark); }
+    #login-overlay .login-card { background: transparent; border: 0; color: var(--text-dark); gap: 14px; max-width: 380px; }
+    #login-overlay .login-card h2 { font-size: 1.7rem; margin-bottom: 4px; }
+    #login-overlay .login-sub { color: var(--text-muted); margin-bottom: 14px; }
+    #login-overlay input { background: var(--soft); border: 0; color: var(--text-dark); height: 56px; border-radius: 14px; font-size: 17px; }
+    #login-overlay .btn-save { height: 58px; font-size: 1.15rem; border-radius: 14px; justify-content: center; }
+}
+@media (max-width: 768px) {
+    input:focus, select:focus, textarea:focus { outline: 2px solid #bcd0fb !important; outline-offset: 0; }
+    #payment-modal-global > div > div:last-child .btn { background: var(--soft) !important; color: var(--text-dark) !important; border: 0 !important; }
+    #payment-modal-global > div > div:last-child .btn-save, #payment-modal-global > div > div:last-child .btn.btn-save { background: var(--ink) !important; color: #fff !important; }
+    #payment-modal-global input#pay-amount { background: var(--soft) !important; }
+}

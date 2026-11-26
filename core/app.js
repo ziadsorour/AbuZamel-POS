@@ -5802,3 +5802,25 @@ function qsPay(mode) {
         await handleSaveInvoice(false);
     };
 }
+
+// Calm phone look: hide secondary export buttons, start in the light theme
+(function azCalm() {
+    if (!window.matchMedia || !window.matchMedia('(max-width: 768px)').matches) return;
+    try { if (typeof state !== 'undefined' && state.theme === 'dark') { state.theme = 'light'; } } catch (e) {}
+    const sw = () => { if (document.body && document.body.classList.contains('dark-mode') && !window._azThemeTouched) document.body.className = 'light-mode'; };
+    document.addEventListener('DOMContentLoaded', sw); sw();
+    document.addEventListener('click', e => { if (e.target.closest && e.target.closest('#theme-toggle')) window._azThemeTouched = true; }, true);
+    function mark() {
+        document.querySelectorAll('.page-header button, .page-header .btn, .table-actions button').forEach(b => {
+            if (/تصدير|استيراد|Excel|إكسل/.test(b.textContent) && !b.classList.contains('az-secondary')) b.classList.add('az-secondary');
+        });
+        const t = document.getElementById('theme-toggle');
+        if (t && !t._azc && typeof state !== 'undefined' && state.theme === 'light') {
+            t._azc = 1; const i = t.querySelector('i'), s = t.querySelector('span');
+            if (i) i.className = 'fas fa-moon'; if (s) s.innerText = 'الوضع الليلي';
+        }
+    }
+    let tm = null;
+    new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(mark, 80); }).observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', mark);
+})();

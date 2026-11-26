@@ -2856,8 +2856,14 @@ async function importData(event) {
             if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية:\n' + summary + '\nهل أنت متأكد؟')) {
                 step = 'رفع البيانات';
                 if (db.isRemote) {
-                    const counts = await db.importAll(data, (st, n, tot) => { try { document.title = 'استعادة ' + st + ' ' + n + '/' + tot; } catch (x) {} });
-                    document.title = 'AbuZamel Distribution System';
+                    const ov = document.createElement('div');
+                    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(5,10,25,.88);display:flex;align-items:center;justify-content:center;color:#fff;font-family:inherit;direction:rtl;text-align:center;padding:20px';
+                    ov.innerHTML = '<div><div style="font-size:1.3rem;font-weight:800;margin-bottom:12px">جاري استعادة البيانات... لا تقفل الصفحة</div><div id="az-imp-p" style="font-size:1.1rem">0 / ' + knownStores.reduce((t, k) => t + (Array.isArray(data[k]) ? data[k].length : 0), 0) + '</div></div>';
+                    document.body.appendChild(ov);
+                    let counts;
+                    try {
+                        counts = await db.importAll(data, (st, n, tot) => { const el = document.getElementById('az-imp-p'); if (el) el.textContent = n + ' / ' + tot + '  (' + st + ')'; });
+                    } finally { ov.remove(); }
                     const failed = counts.__failed || []; delete counts.__failed;
                     let msg = 'تمت استعادة البيانات!\n' + Object.entries(counts).filter(([k, v]) => v > 0).map(([k, v]) => k + ': ' + v).join('\n');
                     if (failed.length) msg += '\n\nتعذر استيراد ' + failed.length + ' سجل:\n' + failed.slice(0, 8).map(f => f.store + ' #' + f.key + ' (' + f.error + ')').join('\n');
@@ -4272,7 +4278,12 @@ function buildCustomerStatement(customer, invoices, payments, returns, startDate
     const allPay = payments.filter(p => p.customerId == cid);
     const allRet = returns.filter(r => r.customerId == cid);
     const all = [
-        ...allInv.map(inv => ({ date: inv.date, sk: inv.date, type: 'فاتورة مبيعات', id: inv.id, debit: invoiceOwnDebit(inv, returns), credit: Number(inv.paid) || 0, ref: `فاتورة #${inv.id}`, originalType: 'invoice', cat: 'sale' })),
+        // like the shop's old statement: the invoice row carries the sale, its cash paid at the counter is its own row right after it
+        ...allInv.flatMap(inv => {
+            const rows = [{ date: inv.date, sk: inv.date, type: 'فاتورة مبيعات', id: inv.id, debit: invoiceOwnDebit(inv, returns), credit: 0, ref: `فاتورة #${inv.id}`, originalType: 'invoice', cat: 'sale', sub: 0 }];
+            if ((Number(inv.paid) || 0) > 0) rows.push({ date: inv.date, sk: inv.date, type: 'دفعة نقدية (مع الفاتورة)', id: inv.id, debit: 0, credit: Number(inv.paid) || 0, ref: `سداد تبع فاتورة #${inv.id}`, originalType: 'invoicepay', cat: 'invpaid', sub: 1 });
+            return rows;
+        }),
         ...allPay.map(p => {
             const isOut = p.direction === 'out';
             return { date: p.date, sk: p.createdAt || p.date, type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)', id: p.id,
@@ -4281,7 +4292,7 @@ function buildCustomerStatement(customer, invoices, payments, returns, startDate
         }),
         ...allRet.map(r => ({ date: r.date, sk: r.date, type: 'مرتجع مبيعات', id: r.id, debit: Number(r.cashRefund) || 0, credit: Number(r.total) || 0,
             ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})` + ((Number(r.cashRefund) || 0) > 0 ? ` - رد كاش ${(Number(r.cashRefund)).toFixed(2)}` : ''), originalType: 'return', cat: 'ret' }))
-    ].sort((a, b) => (new Date(a.sk) - new Date(b.sk)) || (a.originalType + a.id).localeCompare(b.originalType + b.id));
+    ].sort((a, b) => (new Date(a.sk) - new Date(b.sk)) || (((a.originalType === 'invoicepay' ? 'invoice' : a.originalType) + a.id).localeCompare((b.originalType === 'invoicepay' ? 'invoice' : b.originalType) + b.id)) || ((a.sub || 0) - (b.sub || 0)));
 
     const initial = Number(customer.initialBalance) || 0;
     let run = initial;
@@ -4311,7 +4322,7 @@ function buildCustomerStatement(customer, invoices, payments, returns, startDate
     const sumOf = (arr, f) => round2(arr.reduce((t, m) => t + f(m), 0));
     const totals = {
         sales: sumOf(shown.filter(m => m.cat === 'sale'), m => m.debit),
-        paid: sumOf(shown.filter(m => m.cat === 'sale'), m => m.credit) + sumOf(shown.filter(m => m.cat === 'in'), m => m.credit),
+        paid: sumOf(shown.filter(m => m.cat === 'invpaid'), m => m.credit) + sumOf(shown.filter(m => m.cat === 'in'), m => m.credit),
         returns: sumOf(shown.filter(m => m.cat === 'ret'), m => m.credit),
         cashOut: sumOf(shown.filter(m => m.cat === 'out'), m => m.debit)
     };

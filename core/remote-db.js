@@ -220,7 +220,8 @@
         async importAll(data, onProgress) {
             const stores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
             const counts = {}, failed = [];
-            let first = true;
+            let first = true, doneRows = 0;
+            const grand = stores.reduce((t, st) => t + (Array.isArray(data[st]) ? data[st].length : 0), 0);
             try {
                 for (const store of stores) {
                     const rows = Array.isArray(data[store]) ? data[store] : [];
@@ -231,30 +232,18 @@
                         first = false;
                         counts[store] += (res && res.ok) || 0;
                         ((res && res.failed) || []).forEach(f => failed.push({ store, key: f.key, error: f.error }));
-                        if (onProgress) onProgress(store, Math.min(i + 250, rows.length), rows.length);
+                        doneRows += Math.min(250, rows.length - i);
+                        if (onProgress) onProgress(store, doneRows, grand);
                     }
                 }
             } catch (e) {
                 // Server without the chunked function: fall back to the single-call restore
                 if (first && /az_import_chunk|PGRST202|Could not find/i.test(String(e && e.message))) {
-                    // Server has no chunked function: restore row by row with the normal save path
-                    await this.rpc('az_clear_all', {}, { retry: false });
+                    // Server has no chunked function yet: use the original single-call restore (keeps ids, counters and old costs).
+                    // Never fall back to saving row by row: it is slow and would not move the id counters.
+                    const c = await this.rpc('az_import', { p_data: data }, { retry: false });
                     this.snap.clear();
-                    for (const store of stores) {
-                        const rows = Array.isArray(data[store]) ? data[store] : [];
-                        counts[store] = 0;
-                        for (const item of rows) {
-                            try {
-                                if (!item || typeof item !== 'object') throw new Error('row_not_object');
-                                await this.update(store, item, { absolute: true });
-                                counts[store]++;
-                            } catch (er) { failed.push({ store, key: item && (item.id || item.date) || '?', error: String(er.message || er) }); }
-                        }
-                        if (onProgress) onProgress(store, rows.length, rows.length);
-                    }
-                    this.snap.clear();
-                    counts.__failed = failed;
-                    return counts;
+                    return c;
                 }
                 throw e;
             }

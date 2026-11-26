@@ -217,9 +217,49 @@
             this.snap.clear();
         }
 
-        async importAll(data) {
-            const counts = await this.rpc('az_import', { p_data: data }, { retry: false });
+        async importAll(data, onProgress) {
+            const stores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
+            const counts = {}, failed = [];
+            let first = true;
+            try {
+                for (const store of stores) {
+                    const rows = Array.isArray(data[store]) ? data[store] : [];
+                    counts[store] = 0;
+                    if (!rows.length && !first) continue;
+                    for (let i = 0; i === 0 || i < rows.length; i += 250) {
+                        const res = await this.rpc('az_import_chunk', { p_store: store, p_rows: rows.slice(i, i + 250), p_reset: first });
+                        first = false;
+                        counts[store] += (res && res.ok) || 0;
+                        ((res && res.failed) || []).forEach(f => failed.push({ store, key: f.key, error: f.error }));
+                        if (onProgress) onProgress(store, Math.min(i + 250, rows.length), rows.length);
+                    }
+                }
+            } catch (e) {
+                // Server without the chunked function: fall back to the single-call restore
+                if (first && /az_import_chunk|PGRST202|Could not find/i.test(String(e && e.message))) {
+                    // Server has no chunked function: restore row by row with the normal save path
+                    await this.rpc('az_clear_all', {}, { retry: false });
+                    this.snap.clear();
+                    for (const store of stores) {
+                        const rows = Array.isArray(data[store]) ? data[store] : [];
+                        counts[store] = 0;
+                        for (const item of rows) {
+                            try {
+                                if (!item || typeof item !== 'object') throw new Error('row_not_object');
+                                await this.update(store, item, { absolute: true });
+                                counts[store]++;
+                            } catch (er) { failed.push({ store, key: item && (item.id || item.date) || '?', error: String(er.message || er) }); }
+                        }
+                        if (onProgress) onProgress(store, rows.length, rows.length);
+                    }
+                    this.snap.clear();
+                    counts.__failed = failed;
+                    return counts;
+                }
+                throw e;
+            }
             this.snap.clear();
+            counts.__failed = failed;
             return counts;
         }
     }

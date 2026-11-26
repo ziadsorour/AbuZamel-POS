@@ -2821,22 +2821,36 @@ async function importData(event) {
     if (!file) return;
 
     const reader = new FileReader();
+    reader.onerror = () => alert('مقدرتش أقرا الملف. جرّب تختاره تاني.');
     reader.onload = async (e) => {
+        let step = 'قراءة الملف';
         try {
-            const data = JSON.parse(e.target.result);
+            let text = String(e.target.result || '').replace(/^\uFEFF/, '').trim();
+            let data;
+            try { data = JSON.parse(text); }
+            catch (pe) { alert('الملف مش JSON صالح (' + pe.message + '). لازم تختار ملف النسخة الاحتياطية اللي نزل من "تصدير نسخة احتياطية" في النسخة القديمة، بامتداد .json.'); return; }
+            // Some exports wrap the data: { data: {...} }
+            if (data && !Array.isArray(data) && typeof data === 'object' && data.data && typeof data.data === 'object' && !Array.isArray(data.data)) data = data.data;
             // Validate BEFORE deleting anything: a wrong file must never wipe the current data
             const knownStores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
             const looksLikeBackup = data && typeof data === 'object' && !Array.isArray(data) &&
                 knownStores.some(k => Array.isArray(data[k])) &&
-                knownStores.every(k => data[k] === undefined || Array.isArray(data[k]));
+                knownStores.every(k => data[k] === undefined || data[k] === null || Array.isArray(data[k]));
             if (!looksLikeBackup) {
-                alert('الملف ده مش نسخة احتياطية صالحة للنظام. محدش اتمسح.');
+                alert('الملف ده مش نسخة احتياطية صالحة للنظام (مفيش فيه منتجات/عملاء/فواتير بالشكل المعروف). محدش اتمسح.');
                 return;
             }
-            if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية. هل أنت متأكد؟')) {
+            knownStores.forEach(k => { if (data[k] === null) delete data[k]; });
+            const summary = knownStores.filter(k => Array.isArray(data[k]) && data[k].length).map(k => k + ': ' + data[k].length).join('\n');
+            if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية:\n' + summary + '\nهل أنت متأكد؟')) {
+                step = 'رفع البيانات';
                 if (db.isRemote) {
-                    const counts = await db.importAll(data);
-                    alert('تمت استعادة البيانات بنجاح!\n' + Object.entries(counts).filter(([k, v]) => v > 0).map(([k, v]) => k + ': ' + v).join('\n'));
+                    const counts = await db.importAll(data, (st, n, tot) => { try { document.title = 'استعادة ' + st + ' ' + n + '/' + tot; } catch (x) {} });
+                    document.title = 'AbuZamel Distribution System';
+                    const failed = counts.__failed || []; delete counts.__failed;
+                    let msg = 'تمت استعادة البيانات!\n' + Object.entries(counts).filter(([k, v]) => v > 0).map(([k, v]) => k + ': ' + v).join('\n');
+                    if (failed.length) msg += '\n\nتعذر استيراد ' + failed.length + ' سجل:\n' + failed.slice(0, 8).map(f => f.store + ' #' + f.key + ' (' + f.error + ')').join('\n');
+                    alert(msg);
                     location.reload();
                     return;
                 }
@@ -2844,8 +2858,7 @@ async function importData(event) {
                 await db.clearAllStores();
 
                 // Restore with IDs to keep relationships consistent
-                const stores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
-                for (const store of stores) {
+                for (const store of knownStores) {
                     const rows = Array.isArray(data[store]) ? data[store] : [];
                     for (const item of rows) {
                         // put() keeps provided id when keyPath is id
@@ -2856,9 +2869,14 @@ async function importData(event) {
                 location.reload();
             }
         } catch (error) {
-        console.error('Import failed:', error);
-        alert('فشل استيراد البيانات. يرجى التأكد من صحة الملف.');
-    }
+            console.error('Import failed at ' + step + ':', error);
+            const m = String((error && error.message) || error);
+            let why = m;
+            if (/owner_only/.test(m)) why = 'الحساب ده مش حساب المدير. الاستعادة للمدير بس.';
+            else if (/not_authorized|401/.test(m)) why = 'الجلسة انتهت. سجّل دخول تاني وجرب.';
+            else if (/57014|timeout|canceling statement/i.test(m)) why = 'السيرفر أخد وقت طويل. جرّب تاني.';
+            alert('فشل استيراد البيانات (' + step + '): ' + why);
+        }
     };
     reader.readAsText(file);
     event.target.value = '';

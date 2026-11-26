@@ -829,6 +829,7 @@ function selectResult(type, item) {
             db.getById('customers', item.id).then(fresh => {
                 if (!fresh || !selectedCustomer || selectedCustomer.id !== fresh.id) return;
                 selectedCustomer = fresh;
+                applyCustomerPrices();
                 const be = document.getElementById('pos-prev-balance');
                 const br = document.getElementById('pos-prev-balance-row');
                 if (be && br) {
@@ -842,6 +843,7 @@ function selectResult(type, item) {
         document.getElementById('pos-customer-phone').value = item.phone;
         document.getElementById('pos-customer-address').value = item.address || '';
         document.getElementById('customer-results').style.display = 'none';
+        applyCustomerPrices();
         
         // Show previous balance
         const balanceRow = document.getElementById('pos-prev-balance-row');
@@ -857,6 +859,35 @@ function selectResult(type, item) {
     }
 }
 
+// ---- Per-customer remembered prices (stored on the customer record: customer.specialPrices = { "<productId>|<unit>": price }) ----
+function spKey(productId, unit) { return String(productId) + '|' + (unit || 'قطعة'); }
+function priceCustomer() {
+    if (selectedCustomer && selectedCustomer.id != null) return selectedCustomer;
+    const inp = document.getElementById('pos-customer-name');
+    const nm = inp ? inp.value.trim() : '';
+    if (!nm) return null;
+    return (state.cache.customers || []).find(c => (c.name || '') === nm) || null;
+}
+function specialPriceFor(productId, unit) {
+    const c = priceCustomer();
+    const v = c && c.specialPrices ? Number(c.specialPrices[spKey(productId, unit)]) : NaN;
+    return isNaN(v) ? null : v;
+}
+// re-price the lines that the seller did not edit by hand (customer picked or changed after adding products)
+function applyCustomerPrices() {
+    let n = 0;
+    cart.forEach(it => {
+        if (it.manualPrice) return;
+        const sp = specialPriceFor(it.id, it.selectedUnit);
+        const master = it.originalPrice != null ? it.originalPrice : it.actualPrice;
+        const target = sp != null ? sp : master;
+        if (Math.abs(target - it.actualPrice) > 0.0001) { it.actualPrice = target; n++; }
+        it.fromCustomer = sp != null && Math.abs(sp - master) > 0.004;
+    });
+    if (n) renderCart();
+    return n;
+}
+
 function addToCart(product) {
     try {
         const r = recentIds().filter(id => String(id) !== String(product.id));
@@ -870,12 +901,15 @@ function addToCart(product) {
         existing.qty++;
         addedIndex = cart.indexOf(existing);
     } else {
+        const unitNow = product.unit || 'قطعة';
+        const sp = specialPriceFor(product.id, unitNow);
         cart.push({ 
             ...product, 
             qty: 1, 
-            selectedUnit: product.unit || 'قطعة',
-            actualPrice: product.salePrice,
-            originalPrice: product.salePrice
+            selectedUnit: unitNow,
+            actualPrice: sp != null ? sp : product.salePrice,
+            originalPrice: product.salePrice,
+            fromCustomer: sp != null && Math.abs(sp - product.salePrice) > 0.004
         });
         addedIndex = cart.length - 1;
     }
@@ -1154,6 +1188,7 @@ function renderCart() {
                 <td class="c-name">
                     <div style="font-weight:700">${esc(item.name)}</div>
                     <div style="font-size:0.7rem; color:var(--text-muted)">${esc(item.barcode)}</div>
+                    ${item.fromCustomer ? '<div class="sp-badge"><i class="fas fa-tag"></i> سعر العميل</div>' : ''}
                 </td>
                 <td class="c-unit" data-label="الوحدة">
                     <select onchange="updateUnit(${index}, this.value)" 
@@ -1190,6 +1225,8 @@ function renderCart() {
 function updatePrice(index, val) {
     const price = parseFloat(val) || 0;
     cart[index].actualPrice = price;
+    cart[index].manualPrice = true;
+    cart[index].fromCustomer = false;
     renderCart();
 }
 
@@ -1209,6 +1246,11 @@ function updateUnit(index, unit) {
         item.actualPrice = item.actualPrice / (item.piecesPerBox || 1);
         if (item.originalPrice != null) item.originalPrice = item.originalPrice / (item.piecesPerBox || 1);
         item.purchasePrice = (Number(item.purchasePrice) || 0) / (item.piecesPerBox || 1);
+    }
+    if (!item.manualPrice) {
+        const sp = specialPriceFor(item.id, unit);
+        if (sp != null) { item.actualPrice = sp; item.fromCustomer = Math.abs(sp - item.originalPrice) > 0.004; }
+        else item.fromCustomer = false;
     }
     
     renderCart();
@@ -1339,6 +1381,30 @@ async function handleSaveInvoice(print = false) {
             customerId = await db.add('customers', customerData);
         }
     }
+
+        // remember the prices the seller set for this customer (not when editing an old invoice, not for cash sales)
+        if (customerId && !editingInvoiceId) {
+            try {
+                const cs = await db.getById('customers', customerId);
+                if (cs) {
+                    const sp = { ...(cs.specialPrices || {}) };
+                    let changed = false;
+                    cart.forEach(it => {
+                        const master = it.originalPrice != null ? it.originalPrice : it.actualPrice;
+                        const k = spKey(it.id, it.selectedUnit);
+                        const price = round2(Number(it.actualPrice) || 0);
+                        if (Math.abs(price - master) > 0.004) {
+                            if (sp[k] !== price) { sp[k] = price; changed = true; }
+                        } else if (k in sp) { delete sp[k]; changed = true; }
+                    });
+                    if (changed) {
+                        const upd = { ...cs, specialPrices: sp };
+                        if (!Object.keys(sp).length) delete upd.specialPrices;
+                        await db.update('customers', upd);
+                    }
+                }
+            } catch (e) { console.error('remember customer prices failed', e); }
+        }
 
         const invoice = {
             date: (editingInvoiceId && editingInvoiceData) ? editingInvoiceData.date : new Date().toISOString(),

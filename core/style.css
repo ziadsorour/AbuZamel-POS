@@ -1677,3 +1677,5 @@ body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }
     .pos-actions .btn i { font-size: 0.72rem; }
 }
 @media (max-width: 768px) { #pos-table th:nth-child(6) { font-size: 0 !important; } }
+
+.sp-badge { display: inline-block; margin-top: 2px; padding: 1px 6px; border-radius: 999px; font-size: 0.66rem; font-weight: 700; color: #fbbf24; background: rgba(251,191,36,0.12); border: 1px solid rgba(251,191,36,0.35); }

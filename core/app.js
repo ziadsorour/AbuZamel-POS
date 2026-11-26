@@ -1256,6 +1256,7 @@ async function handleSaveInvoice(print = false) {
     try {
         // --- EDIT MODE: Revert old invoice effects (stock + balance) ---
         let oldInvBackup = null;
+        let editOldCustId = null, editOldDelta = 0;
         if (editingInvoiceId) {
             const oldInv = await db.getById('invoices', editingInvoiceId);
             if (oldInv) {
@@ -1273,13 +1274,11 @@ async function handleSaveInvoice(print = false) {
                     }
                 }
                 // 2) Revert Customer Balance
+                // The balance is corrected below by the DIFFERENCE between the old and the new invoice
+                // (never reset to this invoice's remaining: later invoices and payments must stay in the balance).
                 if (oldInv.customer && oldInv.customer.id) {
-                    const customer = await db.getById('customers', oldInv.customer.id);
-                    if (customer) {
-                        const debtToRevert = Number(oldInv.remaining) || 0;
-                        customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - debtToRevert));
-                        await db.update('customers', customer);
-                    }
+                    editOldCustId = oldInv.customer.id;
+                    editOldDelta = Math.max(0, Number(oldInv.remaining) || 0) - (Number(oldInv.prevBalance) || 0);
                 }
                 // Note: Old invoice will be overwritten by db.update below (same ID)
             }
@@ -1301,7 +1300,7 @@ async function handleSaveInvoice(print = false) {
 
     // Auto-save/update customer
     let customerId = selectedCustomer ? selectedCustomer.id : null;
-    const customerData = {
+    let customerData = {
         name: customerName,
         phone: customerPhone,
         address: customerAddress,
@@ -1309,6 +1308,13 @@ async function handleSaveInvoice(print = false) {
     };
 
     if (customerId) {
+        // Keep every field of the stored customer (initialBalance!) and only change what this sale changes
+        const stored = await db.getById('customers', customerId);
+        customerData = { ...(stored || {}), name: customerName, phone: customerPhone, address: customerAddress, balance: Math.max(0, remainingBalance) };
+        if (editOldCustId && editOldCustId == customerId && stored) {
+            const newDelta = Math.max(0, remainingBalance) - prevBalance;
+            customerData.balance = round2(Math.max(0, (Number(stored.balance) || 0) - editOldDelta + newDelta));
+        }
         customerData.id = customerId;
         await db.update('customers', customerData);
     } else if (customerName) {
@@ -1322,6 +1328,7 @@ async function handleSaveInvoice(print = false) {
         }
 
         if (existing) {
+            customerData = { ...existing, name: customerData.name, phone: customerData.phone, address: customerData.address, balance: customerData.balance };
             customerData.id = existing.id;
             // Since customer was not selected from dropdown, prevBalance was 0 in UI.
             // So remainingBalance is only this invoice's debt. We must add it.
@@ -1570,12 +1577,16 @@ function editCustomer(customer) {
 async function saveCustomer(e) {
     e.preventDefault();
     const id = document.getElementById('customer-id').value;
+    const newInitial = parseFloat(document.getElementById('cust-initial-balance').value) || 0;
+    // Editing a customer must never reset or swap his balance: keep the stored one and only shift it by a changed opening balance
+    const stored = id ? await db.getById('customers', parseInt(id)) : null;
     const c = {
+        ...(stored || {}),
         name: document.getElementById('cust-name').value,
         phone: document.getElementById('cust-phone').value,
         address: document.getElementById('cust-address').value,
-        initialBalance: parseFloat(document.getElementById('cust-initial-balance').value) || 0,
-        balance: (selectedCustomer && id) ? selectedCustomer.balance : (parseFloat(document.getElementById('cust-initial-balance').value) || 0)
+        initialBalance: newInitial,
+        balance: stored ? round2((Number(stored.balance) || 0) + (newInitial - (Number(stored.initialBalance) || 0))) : newInitial
     };
 
     if (!c.name) return showToast('ادخل اسم العميل', 'error');
@@ -4253,6 +4264,61 @@ async function getAgentName(id) {
 
 // --- Ledger & Account Movements ---
 
+// One place for every customer statement number (screen + print), so they always agree.
+// debit = what the customer owes more, credit = what reduces it.
+function buildCustomerStatement(customer, invoices, payments, returns, startDate, endDate) {
+    const cid = customer.id;
+    const allInv = invoices.filter(inv => inv.customer?.id == cid);
+    const allPay = payments.filter(p => p.customerId == cid);
+    const allRet = returns.filter(r => r.customerId == cid);
+    const all = [
+        ...allInv.map(inv => ({ date: inv.date, sk: inv.date, type: 'فاتورة مبيعات', id: inv.id, debit: invoiceOwnDebit(inv, returns), credit: Number(inv.paid) || 0, ref: `فاتورة #${inv.id}`, originalType: 'invoice', cat: 'sale' })),
+        ...allPay.map(p => {
+            const isOut = p.direction === 'out';
+            return { date: p.date, sk: p.createdAt || p.date, type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)', id: p.id,
+                debit: isOut ? (Number(p.amount) || 0) : 0, credit: isOut ? 0 : (Number(p.amount) || 0),
+                ref: p.note || (isOut ? 'مستردات / صادر' : 'سداد نقدي'), originalType: 'payment', direction: p.direction || 'in', cat: isOut ? 'out' : 'in' };
+        }),
+        ...allRet.map(r => ({ date: r.date, sk: r.date, type: 'مرتجع مبيعات', id: r.id, debit: Number(r.cashRefund) || 0, credit: Number(r.total) || 0,
+            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})` + ((Number(r.cashRefund) || 0) > 0 ? ` - رد كاش ${(Number(r.cashRefund)).toFixed(2)}` : ''), originalType: 'return', cat: 'ret' }))
+    ].sort((a, b) => (new Date(a.sk) - new Date(b.sk)) || (a.originalType + a.id).localeCompare(b.originalType + b.id));
+
+    const initial = Number(customer.initialBalance) || 0;
+    let run = initial;
+    all.forEach(m => { run = round2(run + m.debit - m.credit); m.running = run; });
+    const computed = run;
+    // The balance the shop really uses (POS, customers list). If movements do not explain it (data imported from the old app,
+    // or a manual change), show the gap as its own line instead of silently ending on a different number.
+    const stored = Number(customer.balance) || 0;
+    const gap = round2(stored - computed);
+    const hasGap = Math.abs(gap) >= 0.01 && !(computed < 0 && stored === 0);
+    let adj = null;
+    if (hasGap) {
+        adj = { date: null, type: 'تسوية رصيد', id: 0, debit: gap > 0 ? gap : 0, credit: gap < 0 ? -gap : 0, ref: 'فرق بين الرصيد المسجل للعميل وحركاته', originalType: 'adjust', running: stored, cat: 'adj' };
+    }
+    const startKey = startDate || null, endKey = endDate ? endDate + 'T23:59:59' : null;
+    const inRange = m => (!startKey || String(m.date) >= startKey) && (!endKey || String(m.date) <= endKey);
+    const shown = all.filter(inRange);
+    // balance carried into the period = running balance after the last movement before it
+    let opening = initial;
+    if (startKey) { const before = all.filter(m => String(m.date) < startKey); opening = before.length ? before[before.length - 1].running : initial; }
+    let openingShown = null;
+    if (startKey) openingShown = { label: 'رصيد سابق قبل الفترة', amount: opening, note: 'الرصيد المرحّل لبداية الفترة المختارة' };
+    else if (initial) openingShown = { label: 'رصيد افتتاحي (سابق)', amount: initial, note: 'رصيد مُرحل في بداية التعامل' };
+    const movements = shown.slice();
+    let finalBalance = shown.length ? shown[shown.length - 1].running : opening;
+    if (adj && !endKey) { movements.push(adj); finalBalance = stored; }
+    const sumOf = (arr, f) => round2(arr.reduce((t, m) => t + f(m), 0));
+    const totals = {
+        sales: sumOf(shown.filter(m => m.cat === 'sale'), m => m.debit),
+        paid: sumOf(shown.filter(m => m.cat === 'sale'), m => m.credit) + sumOf(shown.filter(m => m.cat === 'in'), m => m.credit),
+        returns: sumOf(shown.filter(m => m.cat === 'ret'), m => m.credit),
+        cashOut: sumOf(shown.filter(m => m.cat === 'out'), m => m.debit)
+    };
+    totals.paid = round2(totals.paid);
+    return { movements, openingShown, finalBalance: round2(finalBalance), totals, custInvoices: allInv, custReturns: allRet, computed, stored, gap: hasGap ? gap : 0 };
+}
+
 async function showCustomerLedger(customerId, startDate = null, endDate = null) {
     const customer = await db.getById('customers', customerId);
     if (!customer) return showToast('العميل غير موجود', 'error');
@@ -4264,72 +4330,11 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
         db.getAll('returns')
     ]);
 
-    // Filter by customer and date if provided
-    let custInvoices = invoices.filter(inv => inv.customer?.id == customerId);
-    let custPayments = payments.filter(p => p.customerId == customerId);
-    let custReturns = returns.filter(r => r.customerId == customerId);
+    const st = buildCustomerStatement(customer, invoices, payments, returns, startDate, endDate);
+    const { movements, openingShown, totals } = st;
+    const runningBalance = st.finalBalance;
+    const custInvoices = st.custInvoices, custReturns = st.custReturns;
 
-    if (startDate) {
-        custInvoices = custInvoices.filter(inv => inv.date >= startDate);
-        custPayments = custPayments.filter(p => p.date >= startDate);
-        custReturns = custReturns.filter(r => r.date >= startDate);
-    }
-    if (endDate) {
-        custInvoices = custInvoices.filter(inv => inv.date <= endDate + 'T23:59:59');
-        custPayments = custPayments.filter(p => p.date <= endDate + 'T23:59:59');
-        custReturns = custReturns.filter(r => r.date <= endDate + 'T23:59:59');
-    }
-
-    const movements = [
-        ...custInvoices.map(inv => ({
-            date: inv.date,
-            type: 'فاتورة مبيعات',
-            id: inv.id,
-            debit: invoiceOwnDebit(inv, returns),
-            credit: Number(inv.paid) || 0,
-            ref: `فاتورة #${inv.id}`,
-            originalType: 'invoice'
-        })),
-        ...custPayments.map(p => {
-            const isOut = p.direction === 'out'; // New field logic
-            return {
-                date: p.date,
-                sk: p.createdAt,
-                type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)',
-                id: p.id,
-                debit: isOut ? (Number(p.amount) || 0) : 0,
-                credit: isOut ? 0 : (Number(p.amount) || 0),
-                ref: p.note || (isOut ? 'مستردات / صادر' : 'سداد نقدي'),
-                originalType: 'payment',
-                direction: p.direction || 'in'
-            };
-        }),
-        ...custReturns.map(r => ({
-            date: r.date,
-            type: 'مرتجع مبيعات',
-            id: r.id,
-            debit: Number(r.cashRefund) || 0, // cash handed back to the customer
-            credit: Number(r.total) || 0,
-            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})` + ((Number(r.cashRefund) || 0) > 0 ? ` - رد كاش ${(Number(r.cashRefund)).toFixed(2)}` : ''),
-            originalType: 'return'
-        }))
-    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
-
-    // Calculate running balance starting from BEFORE the filtered period if filters are active
-    let runningBalance = customer.initialBalance || 0;
-    
-    // If filtering, we should ideally calculate the balance up to the startDate
-    // For simplicity here, we'll calculate all movements but only DISPLAY filtered ones
-    // Or just calculate running balance over all time. Let's do all time for accuracy.
-    
-    movements.forEach(m => {
-        runningBalance += (m.debit - m.credit);
-        m.running = runningBalance;
-    });
-
-    // Final filter for display if needed (but we already filtered the components)
-    // Re-calculating running balance for the entire history to ENSURE accuracy
-    
     contentArea.innerHTML = `
         <div class="page-header">
             <div class="header-title">
@@ -4382,9 +4387,9 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                     <h2 class="stat-value">${runningBalance.toFixed(2)} ج.م</h2>
                 </div>
             </div>
-            ${renderStatCard('إجمالي المبيعات', custInvoices.reduce((sum, i) => sum + i.total, 0).toFixed(2), 'fas fa-shopping-cart', 'primary')}
-            ${renderStatCard('إجمالي المدفوعات', custPayments.filter(p=>p.direction!=='out').reduce((sum, p) => sum + p.amount, 0).toFixed(2), 'fas fa-check-double', 'success')}
-            ${renderStatCard('إجمالي المرتجعات', custReturns.reduce((sum, r) => sum + r.total, 0).toFixed(2), 'fas fa-undo', 'accent')}
+            ${renderStatCard('إجمالي المبيعات', totals.sales.toFixed(2), 'fas fa-shopping-cart', 'primary')}
+            ${renderStatCard('إجمالي المدفوعات', totals.paid.toFixed(2), 'fas fa-check-double', 'success')}
+            ${renderStatCard('إجمالي المرتجعات', totals.returns.toFixed(2), 'fas fa-undo', 'accent')}
         </div>
 
         <div class="card statement-card">
@@ -4400,19 +4405,19 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                     </tr>
                 </thead>
                 <tbody>
-                    ${customer.initialBalance ? `
+                    ${openingShown ? `
                         <tr class="initial-row">
                             <td>-</td>
-                            <td style="font-weight:700">رصيد افتتاحي (سابق)</td>
-                            <td class="text-danger">${customer.initialBalance.toFixed(2)}</td>
-                            <td>-</td>
-                            <td style="font-weight:900">${customer.initialBalance.toFixed(2)}</td>
-                            <td>رصيد مُرحل في بداية التعامل</td>
+                            <td style="font-weight:700">${esc(openingShown.label)}</td>
+                            <td class="text-danger">${openingShown.amount > 0 ? openingShown.amount.toFixed(2) : '-'}</td>
+                            <td class="text-success">${openingShown.amount < 0 ? (-openingShown.amount).toFixed(2) : '-'}</td>
+                            <td style="font-weight:900">${openingShown.amount.toFixed(2)}</td>
+                            <td>${esc(openingShown.note)}</td>
                         </tr>
                     ` : ''}
                     ${movements.map(m => `
                         <tr class="${m.originalType}-row">
-                            <td>${new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })}</td>
+                            <td>${m.date ? new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' }) : '-'}</td>
                             <td>
                                 <span class="badge-type ${m.originalType}">${esc(m.type)}</span>
                             </td>
@@ -4436,7 +4441,7 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                             </td>
                         </tr>
                     `).join('')}
-                    ${movements.length === 0 && !customer.initialBalance ? '<tr><td colspan="6" style="text-align:center; padding: 3rem; color: #666;">لا توجد حركات مسجلة لهذا العميل</td></tr>' : ''}
+                    ${movements.length === 0 && !openingShown ? '<tr><td colspan="6" style="text-align:center; padding: 3rem; color: #666;">لا توجد حركات مسجلة لهذا العميل</td></tr>' : ''}
                 </tbody>
             </table>
         </div>
@@ -4614,6 +4619,8 @@ async function recalculateCustomerBalance(customerId) {
         });
 
         const newBalance = Math.max(0, round2(debit - credit));
+        if (Math.abs(newBalance - (Number(customer.balance) || 0)) >= 0.01 &&
+            !confirm(`الرصيد المسجل للعميل: ${(Number(customer.balance) || 0).toFixed(2)}\nالرصيد المحسوب من الحركات: ${newBalance.toFixed(2)}\nهل تريد استبدال الرصيد المسجل بالمحسوب؟`)) return;
         customer.balance = newBalance;
         await db.update('customers', customer, { absolute: true });
         
@@ -4983,18 +4990,9 @@ async function printCustomerStatement(customerId) {
     const customer = await db.getById('customers', customerId);
     const invoices = await db.getAll('invoices');
     const payments = await db.getAll('customerPayments');
-    const custInvoices = invoices.filter(inv => inv.customer?.id == customerId);
-    const custPayments = payments.filter(p => p.customerId == customerId);
     const allReturns = await db.getAll('returns');
-    const custReturns = allReturns.filter(r => r.customerId == customerId);
-
-    const movements = [
-        ...custInvoices.map(inv => ({ date: inv.date, desc: `فاتورة #${inv.id}`, debit: invoiceOwnDebit(inv, allReturns), credit: Number(inv.paid) || 0 })),
-        ...custPayments.map(p => p.direction === 'out'
-            ? ({ date: p.date, desc: p.note || 'نقد صادر', debit: Number(p.amount) || 0, credit: 0 })
-            : ({ date: p.date, desc: p.note || 'دفعة سداد', debit: 0, credit: Number(p.amount) || 0 })),
-        ...custReturns.map(r => ({ date: r.date, desc: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`, debit: Number(r.cashRefund) || 0, credit: Number(r.total) || 0 }))
-    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
+    const st = buildCustomerStatement(customer, invoices, payments, allReturns);
+    const movements = st.movements.map(m => ({ date: m.date, desc: m.originalType === 'payment' || m.originalType === 'adjust' ? (m.originalType === 'adjust' ? m.type + ': ' + m.ref : m.ref) : m.ref, debit: m.debit, credit: m.credit, running: m.running }));
 
     executeHiddenPrint(`
         <html>
@@ -5022,29 +5020,33 @@ async function printCustomerStatement(customerId) {
                         <th>البيان</th>
                         <th>مدين (عليه)</th>
                         <th>دائن (له)</th>
+                        <th>الرصيد</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${customer.initialBalance ? `
+                    ${st.openingShown ? `
                         <tr style="background:#f9f9f9; font-weight:bold;">
                             <td>-</td>
-                            <td>رصيد افتتاحي (سابق)</td>
-                            <td>${customer.initialBalance.toFixed(2)}</td>
-                            <td>-</td>
+                            <td>${esc(st.openingShown.label)}</td>
+                            <td>${st.openingShown.amount > 0 ? st.openingShown.amount.toFixed(2) : '-'}</td>
+                            <td>${st.openingShown.amount < 0 ? (-st.openingShown.amount).toFixed(2) : '-'}</td>
+                            <td>${st.openingShown.amount.toFixed(2)}</td>
                         </tr>
                     ` : ''}
                     ${movements.map(m => `
                         <tr>
-                            <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
+                            <td>${m.date ? new Date(m.date).toLocaleDateString('ar-EG') : '-'}</td>
                             <td>${esc(m.desc)}</td>
                             <td>${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td>${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
+                            <td>${m.running.toFixed(2)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
             <div class="summary">
-                <p>الرصيد المتبقي: ${(customer.balance || 0).toFixed(2)} ج.م</p>
+                <p>إجمالي المبيعات: ${st.totals.sales.toFixed(2)} | إجمالي المدفوعات: ${st.totals.paid.toFixed(2)} | إجمالي المرتجعات: ${st.totals.returns.toFixed(2)}</p>
+                <p>الرصيد المتبقي: ${st.finalBalance.toFixed(2)} ج.م</p>
             </div>
         </body>
         </html>

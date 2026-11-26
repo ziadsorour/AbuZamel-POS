@@ -1130,7 +1130,7 @@ async function handleSaveInvoice(print = false) {
                     const customer = await db.getById('customers', oldInv.customer.id);
                     if (customer) {
                         const debtToRevert = Number(oldInv.remaining) || 0;
-                        customer.balance = Math.max(0, (Number(customer.balance) || 0) - debtToRevert);
+                        customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - debtToRevert));
                         await db.update('customers', customer);
                     }
                 }
@@ -1178,7 +1178,7 @@ async function handleSaveInvoice(print = false) {
             customerData.id = existing.id;
             // Since customer was not selected from dropdown, prevBalance was 0 in UI.
             // So remainingBalance is only this invoice's debt. We must add it.
-            customerData.balance = (Number(existing.balance) || 0) + Math.max(0, remainingBalance);
+            customerData.balance = round2((Number(existing.balance) || 0) + Math.max(0, remainingBalance));
             await db.update('customers', customerData);
             customerId = existing.id;
         } else {
@@ -1193,7 +1193,7 @@ async function handleSaveInvoice(print = false) {
             items: cart.map(item => ({
                 ...item, 
                 salePrice: item.actualPrice, // Use adjusted price
-                total: item.actualPrice * item.qty
+                total: round2(item.actualPrice * item.qty)
             })),
             subTotal,
             discount,
@@ -2014,9 +2014,10 @@ async function voidInvoice(id) {
         if (inv.customer && inv.customer.id) {
             const customer = await db.getById('customers', inv.customer.id);
             if (customer) {
-                // inv.remaining represents the debt added to the customer balance
-                const debtToRevert = Number(inv.remaining) || 0;
-                customer.balance = Math.max(0, (Number(customer.balance) || 0) - debtToRevert);
+                // inv.remaining includes the customer's older balance (prevBalance) that was
+                // already owed before this invoice. Only revert the debt this invoice created.
+                const debtToRevert = Math.max(0, (Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0));
+                customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - debtToRevert));
                 await db.update('customers', customer);
             }
         }
@@ -2200,7 +2201,7 @@ function getReturnMaxQty(idx) {
 
 function getReturnPrice(idx) {
     const it = returnModalState?.inv?.items?.[idx];
-    return Number(it?.salePrice) || 0;
+    return Number(it?.actualPrice ?? it?.salePrice) || 0;
 }
 
 function setReturnQty(idx, qty) {
@@ -2383,10 +2384,10 @@ async function confirmReturn(invoiceId) {
             productId: it.id,
             name: it.name,
             barcode: it.barcode,
-            salePrice: Number(it.salePrice) || 0,
+            salePrice: Number(it.actualPrice ?? it.salePrice) || 0,
             purchasePrice: Number(it.purchasePrice) || 0,
             qty: safeQty,
-            total: safeQty * (Number(it.salePrice) || 0)
+            total: round2(safeQty * (Number(it.actualPrice ?? it.salePrice) || 0))
         });
     });
 
@@ -2396,7 +2397,7 @@ async function confirmReturn(invoiceId) {
     }
 
     const reason = document.getElementById('return-reason')?.value || '';
-    const returnTotal = returnItems.reduce((s, it) => s + (Number(it.total) || 0), 0);
+    const returnTotal = round2(returnItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
 
     if (!confirm(`تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟`)) return;
 
@@ -2438,7 +2439,7 @@ async function confirmReturn(invoiceId) {
         const c = await db.getById('customers', custId);
         if (c) {
             const current = Number(c.balance) || 0;
-            c.balance = Math.max(0, current - returnTotal);
+            c.balance = round2(Math.max(0, current - returnTotal));
             await db.update('customers', c);
         }
     }
@@ -2449,15 +2450,17 @@ async function confirmReturn(invoiceId) {
             const itemMatch = inv.items.find(it => it.id === log.productId);
             if (itemMatch) {
                 itemMatch.qty = Math.max(0, (Number(itemMatch.qty) || 0) - (Number(log.qty) || 0));
-                itemMatch.total = Math.max(0, (Number(itemMatch.total) || 0) - (Number(log.total) || 0));
+                itemMatch.total = round2(Math.max(0, (Number(itemMatch.total) || 0) - (Number(log.total) || 0)));
             }
         }
         // Remove fully returned items from the invoice's item list
         inv.items = inv.items.filter(it => it.qty > 0);
     }
-    inv.total = Math.max(0, (Number(inv.total) || 0) - returnTotal);
+    inv.total = round2(Math.max(0, (Number(inv.total) || 0) - returnTotal));
+    // Keep the invoice's remaining debt in step with the return so a later void reverts the right amount
+    inv.remaining = round2(Math.max(0, (Number(inv.remaining) || 0) - returnTotal));
     // Adjust subtotal to maintain accuracy if reprinted
-    inv.subTotal = Math.max(0, (Number(inv.subTotal) || 0) - returnTotal);
+    inv.subTotal = round2(Math.max(0, (Number(inv.subTotal) || 0) - returnTotal));
     await db.update('invoices', inv);
 
     closeReturnModal();
@@ -3070,7 +3073,7 @@ async function supSavePurchase() {
     if (remainingAmount !== 0) {
         const supplier = await db.getById('suppliers', supplierId);
         if (supplier) {
-            supplier.balance = (supplier.balance || 0) + remainingAmount;
+            supplier.balance = round2((supplier.balance || 0) + remainingAmount);
             await db.update('suppliers', supplier);
         }
     }
@@ -3357,7 +3360,7 @@ async function savePurchase() {
         const supplier = await db.getById('suppliers', supplierId);
         if (supplier) {
             const remaining = totalCost - paid;
-            supplier.balance = (Number(supplier.balance) || 0) + Math.max(0, remaining);
+            supplier.balance = round2((Number(supplier.balance) || 0) + Math.max(0, remaining));
             await db.update('suppliers', supplier);
         }
     }
@@ -3553,7 +3556,7 @@ async function closeDay() {
 
 function sumPaidForAgent(invoices, agentId, date) {
     const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && inv?.date && inv.date.startsWith(date));
-    return dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0);
+    return round2(dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0));
 }
 
 function renderSettlementEntryCard(agents, invoices, date) {
@@ -3616,7 +3619,7 @@ async function recalcSettlementDiff() {
     const expected = sumPaidForAgent(invoices, agentId, date);
     expectedEl.value = expected.toFixed(2);
 
-    const diff = received - expected; // + زيادة / - عجز
+    const diff = round2(received - expected); // + زيادة / - عجز
     if (Math.abs(diff) < 0.005) {
         statusEl.value = `تمام (0.00)`;
     } else if (diff < 0) {
@@ -3637,7 +3640,7 @@ async function saveAgentSettlement() {
 
     const invoices = await db.getAll('invoices');
     const expected = sumPaidForAgent(invoices, agentId, date);
-    const diff = received - expected;
+    const diff = round2(received - expected);
     const status = Math.abs(diff) < 0.005 ? 'ok' : diff < 0 ? 'shortage' : 'surplus';
 
     await db.add('settlements', {
@@ -4315,11 +4318,11 @@ async function deletePayment(type, id) {
         // If we delete an IN (payment received), balance increases (debt goes up)
         // If we delete an OUT (refund sent), balance decreases (debt goes down)
         if (type === 'customer') {
-            entity.balance = (entity.balance || 0) + (direction === 'in' ? amount : -amount);
+            entity.balance = round2((entity.balance || 0) + (direction === 'in' ? amount : -amount));
         } else {
             // Supplier: delete OUT (we paid them) -> balance increases (we owe more)
             // delete IN (refund received) -> balance decreases (we owe less)
-            entity.balance = (entity.balance || 0) + (direction === 'out' ? amount : -amount);
+            entity.balance = round2((entity.balance || 0) + (direction === 'out' ? amount : -amount));
         }
         await db.update(entityStore, entity);
     }
@@ -4448,10 +4451,10 @@ async function handleUpdatePayment(event, type, paymentId) {
         const diff = newAmount - oldAmount;
         if (type === 'customer') {
             // Customer: In increases credit (decreases debt), Out increases debt
-            entity.balance = (entity.balance || 0) - (direction === 'in' ? diff : -diff);
+            entity.balance = round2((entity.balance || 0) - (direction === 'in' ? diff : -diff));
         } else {
             // Supplier: Out decreases debt, In decreases bank (increases debt)
-            entity.balance = (entity.balance || 0) - (direction === 'out' ? diff : -diff);
+            entity.balance = round2((entity.balance || 0) - (direction === 'out' ? diff : -diff));
         }
         await db.update(entityStore, entity);
     }
@@ -4486,7 +4489,7 @@ async function handleSavePaymentGlobal() {
         });
         const customer = await db.getById('customers', entityId);
         if (customer) {
-            customer.balance = (customer.balance || 0) - (direction === 'in' ? amount : -amount);
+            customer.balance = round2((customer.balance || 0) - (direction === 'in' ? amount : -amount));
             await db.update('customers', customer);
         }
         const modal = document.getElementById('payment-modal-global');
@@ -4502,7 +4505,7 @@ async function handleSavePaymentGlobal() {
         });
         const supplier = await db.getById('suppliers', entityId);
         if (supplier) {
-            supplier.balance = (supplier.balance || 0) - (direction === 'out' ? amount : -amount);
+            supplier.balance = round2((supplier.balance || 0) - (direction === 'out' ? amount : -amount));
             await db.update('suppliers', supplier);
         }
         const modal = document.getElementById('payment-modal-global');

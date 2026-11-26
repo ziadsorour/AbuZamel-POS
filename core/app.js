@@ -5364,3 +5364,26 @@ async function azToggleUser(username, active) {
     try { await db.rpc('az_set_active', { p_username: username, p_active: active }, { retry: false }); renderUsersCard(); }
     catch (e) { showToast(e.message, 'error'); }
 }
+
+// Mobile: label every table cell with its column title so CSS can show rows as cards on phones.
+(function azMobileTables() {
+    function label(root) {
+        (root || document).querySelectorAll('table').forEach(t => {
+            if (t.classList.contains('no-stack')) return;
+            const heads = [...t.querySelectorAll('thead th')].map(h => h.textContent.trim());
+            if (!heads.length) return;
+            t.classList.add('az-stack');
+            t.querySelectorAll('tbody tr').forEach(tr => {
+                [...tr.children].forEach((td, i) => {
+                    if (td.tagName !== 'TD' || td.hasAttribute('colspan')) return;
+                    const l = heads[i] || '';
+                    if (td.getAttribute('data-label') !== l) td.setAttribute('data-label', l);
+                });
+            });
+        });
+    }
+    let timer = null;
+    const obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(() => label(), 60); });
+    const start = () => { label(); obs.observe(document.body, { childList: true, subtree: true }); };
+    if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();

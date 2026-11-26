@@ -1548,3 +1548,51 @@ body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }
     #login-overlay input { background: var(--soft); border: 1px solid var(--border-dark); color: var(--text-dark); height: 52px; border-radius: 14px; font-size: 16px; }
     #login-overlay .btn-save { height: 52px; font-size: 1.05rem; border-radius: 14px; justify-content: center; background: var(--grad); }
 }
+
+/* ===== Cashier page: original layout, fitted to phone ===== */
+@media (max-width: 768px) {
+    body.pos-page .bottom-nav { display: flex; }
+    body.pos-page #content-area { padding-bottom: 96px; }
+    body.pos-page .mobile-menu-btn { display: flex; }
+    .pos-wrapper { display: flex; flex-direction: column; gap: 14px; }
+    .pos-main { overflow: visible; gap: 14px; }
+    .pos-billing-card { padding: 14px !important; gap: 14px; }
+    .pos-customer-section { display: grid !important; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .pos-customer-section .pos-extra-field { display: block !important; margin: 0; }
+    .pos-customer-section .input-group:first-child { grid-column: 1 / -1; }
+    .pos-customer-section .input-group[style*="span 3"] { grid-column: 1 / -1 !important; }
+    .pos-more-toggle, .pos-extra-toggle, .pos-recent, .pos-pay-quick, .pos-savebar { display: none !important; }
+    .pos-customer-section label { font-size: 0.8rem; }
+    .pos-customer-section input, .pos-customer-section select, #pos-product-search { height: 46px; font-size: 16px; width: 100%; }
+    .pos-summary-card .pos-extra-row { display: flex !important; }
+    .pos-summary-card h3 { display: block; }
+    .pos-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .pos-actions .btn-save { display: inline-flex !important; grid-column: 1 / -1; }
+    .pos-actions .btn { min-height: 48px; font-size: 0.9rem; justify-content: center; }
+    /* cart: the original table, squeezed to fit */
+    .pos-table-section { overflow: visible; }
+    #pos-table { display: table !important; width: 100%; table-layout: fixed; border-collapse: collapse; min-width: 0; }
+    #pos-table thead { display: table-header-group !important; }
+    #pos-table tbody { display: table-row-group !important; }
+    #pos-table tr { display: table-row !important; border: 0 !important; background: none !important; padding: 0 !important; margin: 0 !important; box-shadow: none !important; }
+    #pos-table th, #pos-table td { display: table-cell !important; padding: 8px 3px !important; font-size: 0.78rem; text-align: right; vertical-align: middle; border-bottom: 1px solid var(--border-dark) !important; overflow: hidden; }
+    #pos-table td::before { display: none !important; content: none; }
+    #pos-table th:nth-child(1), #pos-table td:nth-child(1) { width: 25%; }
+    #pos-table th:nth-child(2), #pos-table td:nth-child(2) { width: 20%; }
+    #pos-table th:nth-child(3), #pos-table td:nth-child(3) { width: 17%; }
+    #pos-table th:nth-child(4), #pos-table td:nth-child(4) { width: 15%; }
+    #pos-table th:nth-child(5), #pos-table td:nth-child(5) { width: 14%; }
+    #pos-table th:nth-child(6), #pos-table td:nth-child(6) { width: 9%; padding: 0 !important; }
+    #pos-table th:nth-child(6) { font-size: 0; }
+    #pos-table th { font-size: 0.74rem; white-space: nowrap; }
+    #pos-table td.c-unit select { padding: 2px 0 !important; background-image: none; -webkit-appearance: none; appearance: none; }
+    #pos-table td.c-name div { white-space: normal; word-break: break-word; }
+    #pos-table td.c-price input, #pos-table td.c-unit select, #pos-table .table-qty-input { width: 100% !important; height: 38px !important; padding: 2px 4px !important; font-size: 13px !important; text-align: center; min-width: 0; }
+    .qty-step { display: block; }
+    .qty-btn { display: none !important; }
+    .qty-step input { width: 100% !important; height: 38px !important; font-size: 13px !important; }
+    #pos-table td.c-del .btn-delete { width: 30px; height: 34px; padding: 0; min-width: 0; }
+    #pos-table td.c-total { font-size: 0.8rem; }
+    .pos-sidebar { width: 100%; margin: 0; }
+    .search-results-dropdown { max-height: 50vh; }
+}

@@ -657,7 +657,7 @@ async function renderPOS() {
     
     setupPOSListeners();
     renderRecentChips();
-    if (window.matchMedia('(max-width: 768px)').matches && !editingInvoiceId) azQuickPOS();
+    // original POS layout kept on phones too (quick-sale screen disabled by request)
     await loadAgentsToSelect();
 
     if (editingInvoiceId && editingInvoiceData) {

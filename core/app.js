@@ -325,6 +325,7 @@ function setupEventListeners() {
 async function loadPage(page) {
     if (db.isRemote && !azCanOpen(page)) page = 'pos';
     state.currentPage = page;
+    document.body.classList.toggle('pos-page', page === 'pos');
     contentArea.innerHTML = '<div class="loader-wrapper"><div class="loader"></div></div>';
     
     // Using try-catch to ensure loader is replaced by content or error
@@ -562,17 +563,18 @@ async function renderPOS() {
                             <input type="text" id="pos-customer-name" placeholder="بحث أو إضافة عميل..." autocomplete="off">
                             <div id="customer-results" class="search-results-dropdown"></div>
                         </div>
-                        <div class="input-group">
+                        <button type="button" class="pos-more-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-address-card"></i> بيانات إضافية (هاتف / عنوان / مندوب)</button>
+                        <div class="input-group pos-extra-field">
                             <label><i class="fas fa-phone"></i> رقم الهاتف</label>
                             <input type="text" id="pos-customer-phone" placeholder="أدخل رقم الهاتف">
                         </div>
-                        <div class="input-group">
+                        <div class="input-group pos-extra-field">
                             <label><i class="fas fa-user-tie"></i> المندوب</label>
                             <select id="pos-agent-select">
                                 <option value="">اختر المندوب...</option>
                             </select>
                         </div>
-                        <div class="input-group" style="grid-column: span 3">
+                        <div class="input-group pos-extra-field" style="grid-column: span 3">
                             <label><i class="fas fa-map-marker-alt"></i> العنوان</label>
                             <input type="text" id="pos-customer-address" placeholder="أدخل عنوان العميل">
                         </div>
@@ -583,10 +585,11 @@ async function renderPOS() {
                             <input type="text" id="pos-product-search" placeholder="ابحث بالاسم أو الباركود..." autocomplete="off">
                             <div id="product-results" class="search-results-dropdown"></div>
                         </div>
+                        <div id="pos-recent" class="pos-recent"></div>
                     </div>
 
                     <div class="pos-table-section">
-                        <table class="modern-table" id="pos-table">
+                        <table class="modern-table no-stack" id="pos-table">
                             <thead>
                                 <tr>
                                     <th>المنتج</th>
@@ -614,17 +617,22 @@ async function renderPOS() {
                         <span>حساب سابق:</span>
                         <span id="pos-prev-balance">0.00</span>
                     </div>
-                    <div class="summary-item">
+                    <button type="button" class="pos-more-toggle pos-extra-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-percent"></i> خصم / ضريبة</button>
+                    <div class="summary-item pos-extra-row">
                         <span>الخصم:</span>
                         <input type="number" id="pos-discount" value="0" step="0.01" min="0" oninput="calculateTotals()">
                     </div>
-                    <div class="summary-item">
+                    <div class="summary-item pos-extra-row">
                         <span>الضريبة (%):</span>
                         <input type="number" id="pos-tax" value="0" min="0" oninput="calculateTotals()">
                     </div>
                     <div class="summary-item" style="border-top: 1px solid #444; padding-top: 0.5rem; margin-top: 0.5rem;">
                         <span>المبلغ المدفوع:</span>
                         <input type="number" id="pos-paid-amount" value="0" step="0.01" oninput="calculateTotals()">
+                    </div>
+                    <div class="pos-pay-quick">
+                        <button type="button" class="btn" onclick="posQuickPay('cash')"><i class="fas fa-money-bill-wave"></i> كاش كامل</button>
+                        <button type="button" class="btn" onclick="posQuickPay('credit')"><i class="fas fa-clock"></i> آجل</button>
                     </div>
                     <hr>
                     <div class="summary-total">
@@ -640,10 +648,15 @@ async function renderPOS() {
                     </div>
                 </div>
             </aside>
+            <div class="pos-savebar">
+                <div class="pos-bar-total"><small>الإجمالي</small><b id="pos-bar-total">0.00</b></div>
+                <button class="btn btn-save" ${isClosed ? 'disabled' : ''} onclick="handleSaveInvoice(false)"><i class="fas fa-save"></i> حفظ الفاتورة</button>
+            </div>
         </div>
     `;
     
     setupPOSListeners();
+    renderRecentChips();
     await loadAgentsToSelect();
 
     if (editingInvoiceId && editingInvoiceData) {
@@ -710,16 +723,21 @@ function setupPOSListeners() {
 
     // Debounced SEARCH logic: near-instant with cache
     const debouncedProductSearch = debounce(async (query) => {
-        if (query.length >= 2) {
-            const filtered = state.cache.products.filter(p => 
-                p.name.toLowerCase().includes(query) || 
-                (p.barcode && p.barcode === query)
-            );
-            renderSearchResults(filtered, productResults, 'product');
+        query = query.trim();
+        if (query.length >= 1) {
+            const starts = [], inc = [];
+            for (const p of state.cache.products) {
+                const n = (p.name || '').toLowerCase();
+                if (p.barcode && p.barcode === query) starts.unshift(p);
+                else if (n.startsWith(query)) starts.push(p);
+                else if (n.includes(query) || (p.barcode && String(p.barcode).startsWith(query))) inc.push(p);
+                if (starts.length + inc.length >= 60) break;
+            }
+            renderSearchResults(starts.concat(inc), productResults, 'product');
         } else {
             productResults.style.display = 'none';
         }
-    }, 300);
+    }, 120);
 
     const debouncedCustomerSearch = debounce(async (query) => {
         if (query.length >= 2) {
@@ -755,12 +773,47 @@ function renderSearchResults(items, container, type) {
         container.style.display = 'none';
         return;
     }
-    container.innerHTML = items.map(item => `
-        <div class="result-item" tabindex="0" onclick="selectResult('${type}', ${JSON.stringify(item).replace(/"/g, '&quot;')})">
-            ${type === 'product' ? `${esc(item.name)} (${item.salePrice} ج.م)` : `${esc(item.name)} - ${esc(item.phone)}`}
+    const shown = items.slice(0, 20);
+    container._items = shown;
+    container.innerHTML = shown.map((item, i) => `
+        <div class="result-item" tabindex="0" onclick="pickResult(this, '${type}', ${i})">
+            ${type === 'product'
+                ? `<span class="ri-name">${esc(item.name)}</span><span class="ri-meta"><b>${item.salePrice}</b> ج.م · مخزون ${item.stock}</span>`
+                : `<span class="ri-name">${esc(item.name)}</span><span class="ri-meta">${esc(item.phone || '')}</span>`}
         </div>
-    `).join('');
+    `).join('') + (items.length > shown.length ? '<div class="result-more">في نتايج أكتر، اكتب حروف أكتر للتحديد</div>' : '');
     container.style.display = 'block';
+}
+
+function pickResult(el, type, i) {
+    const c = el.parentElement;
+    if (c && c._items && c._items[i]) selectResult(type, c._items[i]);
+}
+
+function recentIds() { try { return JSON.parse(localStorage.getItem('az_recent_products') || '[]'); } catch (e) { return []; } }
+function renderRecentChips() {
+    const box = document.getElementById('pos-recent');
+    if (!box) return;
+    const byId = new Map(state.cache.products.map(p => [String(p.id), p]));
+    const list = recentIds().map(id => byId.get(String(id))).filter(Boolean).slice(0, 8);
+    box.innerHTML = list.length ? '<span class="pos-recent-label">الأخيرة:</span>' + list.map(p => `<button type="button" class="pos-chip" onclick="addRecent('${String(p.id).replace(/'/g, '')}')">${esc(p.name)}</button>`).join('') : '';
+}
+function addRecent(id) {
+    const p = state.cache.products.find(x => String(x.id) === String(id));
+    if (p) addToCart(p);
+}
+function posQuickPay(mode) {
+    const subtotal = cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0);
+    const discount = parseFloat(document.getElementById('pos-discount').value) || 0;
+    const taxPercent = parseFloat(document.getElementById('pos-tax').value) || 0;
+    const inv = (subtotal - discount) * (1 + taxPercent / 100);
+    document.getElementById('pos-paid-amount').value = mode === 'cash' ? inv.toFixed(2) : 0;
+    calculateTotals();
+}
+function stepQty(index, d) {
+    if (!cart[index]) return;
+    cart[index].qty = Math.max(1, (parseInt(cart[index].qty) || 1) + d);
+    renderCart();
 }
 
 function selectResult(type, item) {
@@ -804,6 +857,11 @@ function selectResult(type, item) {
 }
 
 function addToCart(product) {
+    try {
+        const r = recentIds().filter(id => String(id) !== String(product.id));
+        r.unshift(product.id);
+        localStorage.setItem('az_recent_products', JSON.stringify(r.slice(0, 12)));
+    } catch (e) {}
     const existing = cart.find(item => item.id === product.id && item.selectedUnit === (product.unit || 'قطعة'));
     let addedIndex = -1;
     if (existing) {
@@ -821,7 +879,8 @@ function addToCart(product) {
     }
     renderCart();
 
-    // Auto-focus on unit
+    // Auto-focus on unit (not on phones: it would pop the keyboard)
+    if (window.matchMedia('(max-width: 768px)').matches) { const sb = document.getElementById('pos-recent'); if (sb) renderRecentChips(); return; }
     setTimeout(() => {
         const units = document.querySelectorAll('.pos-unit-input');
         if (units && units[addedIndex]) {
@@ -838,7 +897,7 @@ function removeFromCart(index) {
 // Product Management
 async function renderProducts() {
     const products = state.cache.products;
-    const initialLimit = 100;
+    const initialLimit = window.matchMedia('(max-width: 768px)').matches ? 30 : 100;
     const displayProducts = products.slice(0, initialLimit);
 
     contentArea.innerHTML = `
@@ -944,7 +1003,7 @@ async function renderProducts() {
 }
 
 function loadMoreProducts(offset) {
-    const limit = 100;
+    const limit = window.matchMedia('(max-width: 768px)').matches ? 30 : 100;
     const products = state.cache.products;
     const nextBatch = products.slice(offset, offset + limit);
     const tbody = document.getElementById('products-list-body');
@@ -984,10 +1043,10 @@ async function filterProducts(query) {
         p.name.toLowerCase().includes(q) || 
         (p.barcode && p.barcode.includes(q))
     );
-    document.getElementById('products-list-body').innerHTML = renderProductRows(filtered.slice(0, 100));
+    document.getElementById('products-list-body').innerHTML = renderProductRows(filtered.slice(0, window.matchMedia('(max-width: 768px)').matches ? 30 : 100));
     
     const loadMoreBtn = document.getElementById('load-more-products');
-    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > 100 ? 'flex' : 'none';
+    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > (window.matchMedia('(max-width: 768px)').matches ? 30 : 100) ? 'flex' : 'none';
 }
 
 function showProductModal(product = null) {
@@ -1089,33 +1148,37 @@ function renderCart() {
         const itemTotal = (item.actualPrice * item.qty);
         return `
             <tr>
-                <td>
+                <td class="c-name">
                     <div style="font-weight:700">${esc(item.name)}</div>
                     <div style="font-size:0.7rem; color:var(--text-muted)">${esc(item.barcode)}</div>
                 </td>
-                <td>
+                <td class="c-unit" data-label="الوحدة">
                     <select onchange="updateUnit(${index}, this.value)" 
                         class="table-qty-input pos-unit-input" style="width:70px">
                         <option value="قطعة" ${item.selectedUnit === 'قطعة' ? 'selected' : ''}>قطعة</option>
                         <option value="علبة" ${item.selectedUnit === 'علبة' ? 'selected' : ''}>علبة</option>
                     </select>
                 </td>
-                <td>
-                    <input type="number" value="${item.actualPrice}" 
+                <td class="c-price" data-label="السعر">
+                    <input type="number" inputmode="decimal" value="${item.actualPrice}" 
                         onchange="updatePrice(${index}, this.value)" 
                         onkeydown="if(event.key === 'Enter') { updatePrice(${index}, this.value); setTimeout(() => { const q = document.querySelectorAll('.pos-qty-input')[${index}]; if(q){ q.focus(); q.select(); } }, 0); event.stopPropagation(); event.preventDefault(); }"
                         class="table-qty-input pos-price-input" style="width:70px">
                 </td>
-                <td>
-                    <input type="number" value="${item.qty}" 
-                        onchange="updateQty(${index}, this.value)" 
-                        onkeydown="if(event.key === 'Enter') { updateQty(${index}, this.value); setTimeout(() => { const s = document.getElementById('pos-product-search'); if(s) s.focus(); }, 0); event.stopPropagation(); event.preventDefault(); }"
-                        class="table-qty-input pos-qty-input">
+                <td class="c-qty" data-label="الكمية">
+                    <div class="qty-step">
+                        <button type="button" class="qty-btn" onclick="stepQty(${index}, -1)">&minus;</button>
+                        <input type="number" inputmode="numeric" value="${item.qty}" 
+                            onchange="updateQty(${index}, this.value)" 
+                            onkeydown="if(event.key === 'Enter') { updateQty(${index}, this.value); setTimeout(() => { const s = document.getElementById('pos-product-search'); if(s) s.focus(); }, 0); event.stopPropagation(); event.preventDefault(); }"
+                            class="table-qty-input pos-qty-input">
+                        <button type="button" class="qty-btn" onclick="stepQty(${index}, 1)">+</button>
+                    </div>
                 </td>
-                <td style="font-weight:700">${itemTotal.toFixed(2)}</td>
-                <td><button type="button" class="btn-delete" onclick="removeFromCart(${index})"><i class="fas fa-trash"></i></button></td>
+                <td class="c-total" data-label="الإجمالي" style="font-weight:700">${itemTotal.toFixed(2)}</td>
+                <td class="c-del"><button type="button" class="btn-delete" onclick="removeFromCart(${index})"><i class="fas fa-trash"></i></button></td>
             </tr>
-        `;
+                `;
     }).join('');
     calculateTotals();
 }
@@ -1164,6 +1227,7 @@ function calculateTotals() {
     
     document.getElementById('pos-total-before').innerText = subtotal.toFixed(2);
     document.getElementById('pos-final-total').innerText = total.toFixed(2);
+    const bt = document.getElementById('pos-bar-total'); if (bt) bt.innerText = total.toFixed(2);
 }
 
 async function handleSaveInvoice(print = false) {
@@ -1346,7 +1410,7 @@ async function handleSaveInvoice(print = false) {
 // Customer Management
 async function renderCustomers() {
     const customers = state.cache.customers;
-    const initialLimit = 100;
+    const initialLimit = (window.matchMedia('(max-width: 768px)').matches ? 30 : 100);
     const displayCustomers = customers.slice(0, initialLimit);
 
     contentArea.innerHTML = `
@@ -1448,7 +1512,7 @@ function renderCustomerRows(customers) {
 }
 
 function loadMoreCustomers(offset) {
-    const limit = 100;
+    const limit = (window.matchMedia('(max-width: 768px)').matches ? 30 : 100);
     const customers = state.cache.customers;
     const nextBatch = customers.slice(offset, offset + limit);
     const tbody = document.getElementById('customers-list-body');
@@ -1469,10 +1533,10 @@ async function filterCustomers(query) {
         c.name.toLowerCase().includes(q) || 
         (c.phone && c.phone.includes(q))
     );
-    document.getElementById('customers-list-body').innerHTML = renderCustomerRows(filtered.slice(0, 100));
+    document.getElementById('customers-list-body').innerHTML = renderCustomerRows(filtered.slice(0, (window.matchMedia('(max-width: 768px)').matches ? 30 : 100)));
     
     const loadMoreBtn = document.getElementById('load-more-customers');
-    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > 100 ? 'flex' : 'none';
+    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > (window.matchMedia('(max-width: 768px)').matches ? 30 : 100) ? 'flex' : 'none';
 }
 
 function showCustomerModal(customer = null) {
@@ -1765,7 +1829,7 @@ function renderAgentRows(agents) {
             <td>${esc(a.name)}</td>
             <td>${esc(a.phone)}</td>
             <td>${esc(a.address || '-')}</td>
-            <td>${a.commission}%</td>
+            <td>${a.commission || 0}%</td>
             <td>0.00</td>
             <td>
                 <button class="btn-edit" onclick="editAgent(${JSON.stringify(a).replace(/"/g, '&quot;')})" title="تعديل"><i class="fas fa-edit"></i> تعديل</button>
@@ -1786,7 +1850,7 @@ function showAgentModal(agent = null) {
         document.getElementById('agent-name').value = agent.name;
         document.getElementById('agent-phone').value = agent.phone;
         document.getElementById('agent-address').value = agent.address;
-        document.getElementById('agent-commission').value = agent.commission;
+        document.getElementById('agent-commission').value = agent.commission || 0;
     } else {
         title.innerText = 'إضافة مندوب جديد';
         form.reset();
@@ -5365,25 +5429,140 @@ async function azToggleUser(username, active) {
     catch (e) { showToast(e.message, 'error'); }
 }
 
-// Mobile: label every table cell with its column title so CSS can show rows as cards on phones.
+// Mobile: compact rows. Tables turn into 1-2 line rows (title + key values + icon actions);
+// tap a row for the rest. Long tables get a search box and "show more" paging.
 (function azMobileTables() {
+    const PAGE = 30;
+    const isAct = h => h === '' || /^(إجراء|العمليات|ملاحظات \/ إجراءات)/.test(h);
+    function classify(heads) {
+        const n = heads.length;
+        const cols = heads.map(() => 'more');
+        let title = heads.findIndex(h => /^(الاسم|اسم|المنتج|العميل|المورد|المندوب|البيان|البند|الصنف)/.test(h));
+        if (title < 0) title = heads.findIndex(h => !isAct(h) && !/باركود|^رقم|^#|التاريخ/.test(h));
+        if (title < 0) title = 0;
+        heads.forEach((h, i) => { if (isAct(h)) cols[i] = 'act'; });
+        cols[title] = 'title';
+        let keys = 0;
+        heads.forEach((h, i) => {
+            if (cols[i] !== 'more') return;
+            if (keys < 2 && /سعر البيع|^السعر|المخزون|الرصيد|المتبقي|الإجمالي|إجمالي|المبلغ|القيمة|الصافي|العمولة|الكمية|الديون|المديونية/.test(h)) { cols[i] = 'key'; keys++; }
+        });
+        heads.forEach((h, i) => { if (cols[i] === 'more' && /التاريخ|^رقم|الباركود/.test(h)) cols[i] = 'sub'; });
+        return cols;
+    }
+    function setup(t) {
+        if (t.classList.contains('no-stack')) return;
+        const heads = [...t.querySelectorAll('thead th')].map(h => h.textContent.trim());
+        if (!heads.length) return;
+        t.classList.add('az-stack');
+        const rows = [...t.querySelectorAll('tbody tr')];
+        const compact = heads.length >= 5 && !t.querySelector('tbody input, tbody select, tbody textarea');
+        const cols = compact ? classify(heads) : null;
+        t.classList.toggle('az-compact', !!compact);
+        rows.forEach(tr => {
+            const tds = [...tr.children];
+            const full = tds.every(td => td.tagName === 'TD' && !td.hasAttribute('colspan'));
+            tds.forEach((td, i) => {
+                if (td.tagName !== 'TD' || td.hasAttribute('colspan')) return;
+                const l = heads[i] || '';
+                if (td.getAttribute('data-label') !== l) td.setAttribute('data-label', l);
+                if (cols && full) {
+                    const c = 'az-' + (cols[i] || 'more');
+                    if (!td.classList.contains(c)) { td.classList.remove('az-title', 'az-key', 'az-sub', 'az-act', 'az-more'); td.classList.add(c); }
+                }
+            });
+            if (cols && full && !tr.classList.contains('az-row')) tr.classList.add('az-row');
+        });
+        if (t.id !== 'products-table') paging(t, rows);
+    }
+    function paging(t, rows) {
+        const st = t._az || (t._az = { q: '', limit: PAGE });
+        if (t.closest('.card') && t.closest('.card').querySelector('.load-more-container, .search-input')) { remove(t); return; }
+        const real = rows.filter(tr => !tr.querySelector('td[colspan]'));
+        if (real.length <= PAGE && !st.q) { rows.forEach(tr => tr.classList.remove('az-hide')); remove(t); return; }
+        ensureControls(t);
+        const q = st.q.trim().toLowerCase();
+        let shown = 0, matches = 0;
+        real.forEach(tr => {
+            if (tr._t === undefined) tr._t = tr.textContent.toLowerCase();
+            const ok = !q || tr._t.includes(q);
+            if (ok) matches++;
+            const vis = ok && shown < st.limit;
+            if (vis) shown++;
+            tr.classList.toggle('az-hide', !vis);
+        });
+        const more = t._azMore;
+        if (more) { more.style.display = matches > shown ? '' : 'none'; more.textContent = 'عرض المزيد (' + (matches - shown) + ')'; }
+        if (t._azCount) t._azCount.textContent = matches + ' من ' + real.length;
+    }
+    function remove(t) { if (t._azBox) { t._azBox.remove(); t._azBox = null; } if (t._azMore) { t._azMore.remove(); t._azMore = null; } }
+    function ensureControls(t) {
+        if (t._azBox && t._azBox.isConnected) return;
+        const host = t.closest('.table-responsive') || t;
+        const box = document.createElement('div');
+        box.className = 'az-tools';
+        box.innerHTML = '<input type="search" class="az-tfilter" placeholder="ابحث في القائمة..."><span class="az-count"></span>';
+        host.parentNode.insertBefore(box, host);
+        const inp = box.querySelector('input');
+        inp.addEventListener('input', () => { t._az.q = inp.value; t._az.limit = PAGE; paging(t, [...t.querySelectorAll('tbody tr')]); });
+        t._azBox = box; t._azCount = box.querySelector('.az-count');
+        const btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'btn btn-new az-more-btn';
+        btn.addEventListener('click', () => { t._az.limit += PAGE; paging(t, [...t.querySelectorAll('tbody tr')]); });
+        host.parentNode.insertBefore(btn, host.nextSibling);
+        t._azMore = btn;
+    }
     function label(root) {
         (root || document).querySelectorAll('table').forEach(t => {
-            if (t.classList.contains('no-stack')) return;
-            const heads = [...t.querySelectorAll('thead th')].map(h => h.textContent.trim());
-            if (!heads.length) return;
-            t.classList.add('az-stack');
-            t.querySelectorAll('tbody tr').forEach(tr => {
-                [...tr.children].forEach((td, i) => {
-                    if (td.tagName !== 'TD' || td.hasAttribute('colspan')) return;
-                    const l = heads[i] || '';
-                    if (td.getAttribute('data-label') !== l) td.setAttribute('data-label', l);
-                });
-            });
+            setup(t);
         });
     }
+    document.addEventListener('click', (e) => {
+        const tr = e.target.closest && e.target.closest('tr.az-row');
+        if (!tr || e.target.closest('button, a, input, select, textarea, label')) return;
+        if (tr.querySelector('.az-more')) tr.classList.toggle('open');
+    });
     let timer = null;
-    const obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(() => label(), 60); });
+    const obs = new MutationObserver((muts) => {
+        if (muts.every(m => (m.target.closest && m.target.closest('.az-tools')) )) return;
+        clearTimeout(timer); timer = setTimeout(() => label(), 60);
+    });
     const start = () => { label(); obs.observe(document.body, { childList: true, subtree: true }); };
     if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
+
+// Mobile bottom navigation (sell / customers / invoices / more)
+(function azBottomNav() {
+    function build() {
+        if (document.getElementById('bottom-nav')) return;
+        const nav = document.createElement('nav');
+        nav.id = 'bottom-nav'; nav.className = 'bottom-nav';
+        nav.innerHTML = [
+            ['pos', 'fa-cash-register', 'بيع', 'bn-all'],
+            ['products', 'fa-boxes-stacked', 'المنتجات', 'bn-owner'],
+            ['customers', 'fa-users', 'العملاء', 'bn-all'],
+            ['my-invoices', 'fa-receipt', 'فواتيري', 'bn-seller'],
+            ['reports', 'fa-file-contract', 'التقارير', 'bn-owner'],
+            ['__more', 'fa-bars', 'المزيد', 'bn-all']
+        ].map(([go, ic, t, cls]) => `<button type="button" class="${cls}" data-go="${go}"><i class="fas ${ic}"></i><span>${t}</span></button>`).join('');
+        document.body.appendChild(nav);
+        nav.addEventListener('click', (e) => {
+            const b = e.target.closest('button'); if (!b) return;
+            e.stopPropagation();
+            const go = b.getAttribute('data-go');
+            if (go === '__more') { document.body.classList.toggle('sidebar-open'); return; }
+            document.body.classList.remove('sidebar-open');
+            const item = document.querySelector('.nav-item[data-page="' + go + '"]');
+            if (item) item.click();
+        });
+        const sync = () => {
+            const a = document.querySelector('.nav-item.active');
+            const page = a ? a.getAttribute('data-page') : '';
+            nav.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.getAttribute('data-go') === page));
+        };
+        const side = document.querySelector('.sidebar-nav');
+        if (side) new MutationObserver(sync).observe(side, { attributes: true, subtree: true, attributeFilter: ['class'] });
+        sync();
+    }
+    if (document.body) build(); else document.addEventListener('DOMContentLoaded', build);
 })();

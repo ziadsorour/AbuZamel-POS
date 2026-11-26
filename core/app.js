@@ -1,3 +1,50 @@
+// Escape user-entered text before putting it into innerHTML / print HTML
+function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// Round money to 2 decimals (avoids 0.8999999999999999 style values)
+// Debt an invoice created for the customer by itself:
+// invoice total minus the older balance it carried (prevBalance), plus anything later returned
+// (returns shrink inv.total, and are listed as their own credit lines).
+function invoiceOwnDebit(inv, allReturns) {
+    const returned = (allReturns || [])
+        .filter(r => r.invoiceId == inv.id)
+        .reduce((s, r) => s + (Number(r.total) || 0), 0);
+    return Math.max(0, round2((Number(inv.total) || 0) + returned - (Number(inv.prevBalance) || 0)));
+}
+
+// Sales value of an invoice = what was sold, WITHOUT the customer's older balance (prevBalance)
+function invSales(inv) {
+    return Math.max(0, round2((Number(inv?.total) || 0) - (Number(inv?.prevBalance) || 0)));
+}
+// Debt created by this invoice alone (remaining minus the older balance it carried)
+function invOwnRemaining(inv) {
+    return Math.max(0, round2((Number(inv?.remaining) || 0) - (Number(inv?.prevBalance) || 0)));
+}
+// Invoices store UTC ISO dates; all day/month grouping must use the local day (Egypt is UTC+2/+3)
+function invDate(inv) {
+    if (!inv || !inv.date) return '';
+    const d = new Date(inv.date);
+    return isNaN(d) ? String(inv.date).slice(0, 10) : d.toLocaleDateString('en-CA');
+}
+// Profit of an invoice: item margins minus the discount given
+function invProfit(inv) {
+    const items = Array.isArray(inv?.items) ? inv.items : [];
+    const margin = items.reduce((s, it) => s + ((Number(it.salePrice) || 0) - (Number(it.purchasePrice) || 0)) * (Number(it.qty) || 0), 0);
+    return round2(margin - (Number(inv?.discount) || 0));
+}
+
+// Cash handed back to customers for returned goods on a given local day (optionally for one agent)
+function cashRefundsOn(returns, date, agentId = null) {
+    return round2((returns || [])
+        .filter(r => (Number(r.cashRefund) || 0) > 0 && invDate(r) === date && (agentId === null || r.agentId == agentId))
+        .reduce((s, r) => s + (Number(r.cashRefund) || 0), 0));
+}
+
+function round2(n) {
+    return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
 // --- Global Guard & Error Handling (MUST BE FIRST) ---
 window.onerror = function(msg, url, lineNo, columnNo, error) {
     // Ignore cross-origin script errors (line 0 from CDNs)
@@ -47,13 +94,17 @@ async function init() {
 
     try {
         await db.init();
-        
+        if (db.isRemote) azApplyUser();
+
         // Pre-load static-ish data into cache for instant searching
         await refreshGlobalCache();
         
         setupGlobalGuards();
         setupEventListeners();
-        loadPage('dashboard');
+        if (db.isRemote) azSetupOnlineBanner();
+        const firstPage = (state.user.role === 'seller') ? 'pos' : 'dashboard';
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.toggle('active', i.getAttribute('data-page') === firstPage));
+        loadPage(firstPage);
     } catch (err) {
         console.error('Initialization failed:', err);
         alert('فشل بدء التشغيل: ' + err.message);
@@ -272,7 +323,9 @@ function setupEventListeners() {
 }
 
 async function loadPage(page) {
+    if (db.isRemote && !azCanOpen(page)) page = 'pos';
     state.currentPage = page;
+    document.body.classList.toggle('pos-page', page === 'pos');
     contentArea.innerHTML = '<div class="loader-wrapper"><div class="loader"></div></div>';
     
     // Using try-catch to ensure loader is replaced by content or error
@@ -290,7 +343,7 @@ async function loadPage(page) {
             case 'reports': await renderReports(); break;
             case 'settlement': await renderSettlement(); break;
             case 'settings': await renderSettings(); break;
-            case 'barcodes': await renderBarcodes(); break;
+            case 'my-invoices': await renderMyInvoices(); break;
             case 'customer-ledger': {
                 const urlParams = new URLSearchParams(window.location.search);
                 const id = urlParams.get('id');
@@ -334,32 +387,28 @@ async function renderDashboard() {
     const monthPrefix = today.substring(0, 7); 
     const startDate = monthPrefix + '-01';
     const endDate = monthPrefix + '-31';
+    // Invoice dates are stored in UTC, so widen the fetch by a day and filter by local day below
+    const prevDay = new Date(new Date(startDate + 'T12:00:00').getTime() - 86400000).toLocaleDateString('en-CA');
 
     // Fetch only necessary data for the month
-    const [invoices, expenses, dayClosures] = await Promise.all([
-        db.getByDateRange('invoices', startDate, endDate),
+    const [invoicesRaw, expenses, dayClosures] = await Promise.all([
+        db.getByDateRange('invoices', prevDay, endDate),
         db.getByDateRange('expenses', startDate, endDate),
         db.getByDateRange('dayClosures', startDate, endDate)
     ]);
+    const invoices = (invoicesRaw || []).filter(inv => invDate(inv).startsWith(monthPrefix));
     
     // Stats Calculations
     const isClosedToday = (dayClosures || []).some(c => c?.date === today);
-    const invoicesToday = isClosedToday ? [] : (invoices || []).filter(inv => inv?.date && inv.date.startsWith(today));
-    const salesToday = isClosedToday ? 0 : invoicesToday.reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const invoicesToday = isClosedToday ? [] : (invoices || []).filter(inv => invDate(inv) === today);
+    const salesToday = isClosedToday ? 0 : invoicesToday.reduce((sum, inv) => sum + invSales(inv), 0);
     
-    const salesMonth = (invoices || []).reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const salesMonth = (invoices || []).reduce((sum, inv) => sum + invSales(inv), 0);
     const totalExpenses = (expenses || []).reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0);
     
     // Profit Calc Optimization: reduce redundant calculations
     let actualProfit = 0;
-    (invoices || []).forEach(inv => {
-        if (inv && inv.items) {
-            inv.items.forEach(item => {
-                const margin = ((Number(item.salePrice) || 0) - (Number(item.purchasePrice) || 0)) * (Number(item.qty) || 0);
-                actualProfit += margin;
-            });
-        }
-    });
+    (invoices || []).forEach(inv => { actualProfit += invProfit(inv); });
     actualProfit -= totalExpenses;
     
     const lowStock = products.filter(p => p.stock <= p.minStock);
@@ -400,7 +449,7 @@ async function renderDashboard() {
                         ${lowStock.length > 0 ? lowStock.slice(0, 10).map(p => `
                             <div class="alert-item error">
                                 <i class="fas fa-exclamation-triangle"></i>
-                                <span>${p.name} (${p.stock} قطعة)</span>
+                                <span>${esc(p.name)} (${p.stock} قطعة)</span>
                             </div>
                         `).join('') : '<p class="empty-msg">لا يوجد تنبيهات حالياً</p>'}
                     </div>
@@ -450,7 +499,7 @@ function initDashboardCharts(data = []) {
     data.forEach(inv => {
         if (inv && inv.date) {
             const d = new Date(inv.date).getDate();
-            dailyData[d] = (dailyData[d] || 0) + (Number(inv.total) || 0);
+            dailyData[d] = (dailyData[d] || 0) + invSales(inv);
         }
     });
 
@@ -490,6 +539,7 @@ let editingInvoiceId = null;
 let editingInvoiceData = null;
 
 async function renderPOS() {
+    if (db.isRemote) await refreshGlobalCache(); // live stock and balances from the shared database
     if (!editingInvoiceId) {
         cart = []; // Reset cart on page load if not editing
         selectedCustomer = null; // Reset selected customer for new invoice
@@ -497,7 +547,7 @@ async function renderPOS() {
     const today = new Date().toLocaleDateString('en-CA');
     const isClosed = !!(await db.getById('dayClosures', today));
     contentArea.innerHTML = `
-        <div class="pos-wrapper">
+        <div class="pos-wrapper" id="pos-wrapper">
             <div class="pos-main">
                 <div class="card pos-billing-card">
                     ${isClosed ? `
@@ -512,17 +562,18 @@ async function renderPOS() {
                             <input type="text" id="pos-customer-name" placeholder="بحث أو إضافة عميل..." autocomplete="off">
                             <div id="customer-results" class="search-results-dropdown"></div>
                         </div>
-                        <div class="input-group">
+                        <button type="button" class="pos-more-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-address-card"></i> بيانات إضافية (هاتف / عنوان / مندوب)</button>
+                        <div class="input-group pos-extra-field">
                             <label><i class="fas fa-phone"></i> رقم الهاتف</label>
                             <input type="text" id="pos-customer-phone" placeholder="أدخل رقم الهاتف">
                         </div>
-                        <div class="input-group">
+                        <div class="input-group pos-extra-field">
                             <label><i class="fas fa-user-tie"></i> المندوب</label>
                             <select id="pos-agent-select">
                                 <option value="">اختر المندوب...</option>
                             </select>
                         </div>
-                        <div class="input-group" style="grid-column: span 3">
+                        <div class="input-group pos-extra-field" style="grid-column: span 3">
                             <label><i class="fas fa-map-marker-alt"></i> العنوان</label>
                             <input type="text" id="pos-customer-address" placeholder="أدخل عنوان العميل">
                         </div>
@@ -533,10 +584,11 @@ async function renderPOS() {
                             <input type="text" id="pos-product-search" placeholder="ابحث بالاسم أو الباركود..." autocomplete="off">
                             <div id="product-results" class="search-results-dropdown"></div>
                         </div>
+                        <div id="pos-recent" class="pos-recent"></div>
                     </div>
 
                     <div class="pos-table-section">
-                        <table class="modern-table" id="pos-table">
+                        <table class="modern-table no-stack" id="pos-table">
                             <thead>
                                 <tr>
                                     <th>المنتج</th>
@@ -564,17 +616,22 @@ async function renderPOS() {
                         <span>حساب سابق:</span>
                         <span id="pos-prev-balance">0.00</span>
                     </div>
-                    <div class="summary-item">
+                    <button type="button" class="pos-more-toggle pos-extra-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-percent"></i> خصم / ضريبة</button>
+                    <div class="summary-item pos-extra-row">
                         <span>الخصم:</span>
                         <input type="number" id="pos-discount" value="0" step="0.01" min="0" oninput="calculateTotals()">
                     </div>
-                    <div class="summary-item">
+                    <div class="summary-item pos-extra-row">
                         <span>الضريبة (%):</span>
                         <input type="number" id="pos-tax" value="0" min="0" oninput="calculateTotals()">
                     </div>
                     <div class="summary-item" style="border-top: 1px solid #444; padding-top: 0.5rem; margin-top: 0.5rem;">
                         <span>المبلغ المدفوع:</span>
                         <input type="number" id="pos-paid-amount" value="0" step="0.01" oninput="calculateTotals()">
+                    </div>
+                    <div class="pos-pay-quick">
+                        <button type="button" class="btn" onclick="posQuickPay('cash')"><i class="fas fa-money-bill-wave"></i> كاش كامل</button>
+                        <button type="button" class="btn" onclick="posQuickPay('credit')"><i class="fas fa-clock"></i> آجل</button>
                     </div>
                     <hr>
                     <div class="summary-total">
@@ -590,10 +647,16 @@ async function renderPOS() {
                     </div>
                 </div>
             </aside>
+            <div class="pos-savebar">
+                <div class="pos-bar-total"><small>الإجمالي</small><b id="pos-bar-total">0.00</b></div>
+                <button class="btn btn-save" ${isClosed ? 'disabled' : ''} onclick="handleSaveInvoice(false)"><i class="fas fa-save"></i> حفظ الفاتورة</button>
+            </div>
         </div>
     `;
     
     setupPOSListeners();
+    renderRecentChips();
+    // original POS layout kept on phones too (quick-sale screen disabled by request)
     await loadAgentsToSelect();
 
     if (editingInvoiceId && editingInvoiceData) {
@@ -646,6 +709,10 @@ async function loadAgentsToSelect() {
         opt.innerText = agent.name;
         select.appendChild(opt);
     });
+    if (db.isRemote && state.user.role === 'seller' && state.user.agentId) {
+        select.value = String(state.user.agentId);
+        select.disabled = true;
+    }
 }
 
 function setupPOSListeners() {
@@ -656,16 +723,21 @@ function setupPOSListeners() {
 
     // Debounced SEARCH logic: near-instant with cache
     const debouncedProductSearch = debounce(async (query) => {
-        if (query.length >= 2) {
-            const filtered = state.cache.products.filter(p => 
-                p.name.toLowerCase().includes(query) || 
-                (p.barcode && p.barcode === query)
-            );
-            renderSearchResults(filtered, productResults, 'product');
+        query = query.trim();
+        if (query.length >= 1) {
+            const starts = [], inc = [];
+            for (const p of state.cache.products) {
+                const n = (p.name || '').toLowerCase();
+                if (p.barcode && p.barcode === query) starts.unshift(p);
+                else if (n.startsWith(query)) starts.push(p);
+                else if (n.includes(query) || (p.barcode && String(p.barcode).startsWith(query))) inc.push(p);
+                if (starts.length + inc.length >= 60) break;
+            }
+            renderSearchResults(starts.concat(inc), productResults, 'product');
         } else {
             productResults.style.display = 'none';
         }
-    }, 300);
+    }, 120);
 
     const debouncedCustomerSearch = debounce(async (query) => {
         if (query.length >= 2) {
@@ -701,12 +773,47 @@ function renderSearchResults(items, container, type) {
         container.style.display = 'none';
         return;
     }
-    container.innerHTML = items.map(item => `
-        <div class="result-item" tabindex="0" onclick="selectResult('${type}', ${JSON.stringify(item).replace(/"/g, '&quot;')})">
-            ${type === 'product' ? `${item.name} (${item.salePrice} ج.م)` : `${item.name} - ${item.phone}`}
+    const shown = items.slice(0, 20);
+    container._items = shown;
+    container.innerHTML = shown.map((item, i) => `
+        <div class="result-item" tabindex="0" onclick="pickResult(this, '${type}', ${i})">
+            ${type === 'product'
+                ? `<span class="ri-name">${esc(item.name)}</span><span class="ri-meta"><b>${item.salePrice}</b> ج.م · مخزون ${item.stock}</span>`
+                : `<span class="ri-name">${esc(item.name)}</span><span class="ri-meta">${esc(item.phone || '')}</span>`}
         </div>
-    `).join('');
+    `).join('') + (items.length > shown.length ? '<div class="result-more">في نتايج أكتر، اكتب حروف أكتر للتحديد</div>' : '');
     container.style.display = 'block';
+}
+
+function pickResult(el, type, i) {
+    const c = el.parentElement;
+    if (c && c._items && c._items[i]) selectResult(type, c._items[i]);
+}
+
+function recentIds() { try { return JSON.parse(localStorage.getItem('az_recent_products') || '[]'); } catch (e) { return []; } }
+function renderRecentChips() {
+    const box = document.getElementById('pos-recent');
+    if (!box) return;
+    const byId = new Map(state.cache.products.map(p => [String(p.id), p]));
+    const list = recentIds().map(id => byId.get(String(id))).filter(Boolean).slice(0, 8);
+    box.innerHTML = list.length ? '<span class="pos-recent-label">الأخيرة:</span>' + list.map(p => `<button type="button" class="pos-chip" onclick="addRecent('${String(p.id).replace(/'/g, '')}')">${esc(p.name)}</button>`).join('') : '';
+}
+function addRecent(id) {
+    const p = state.cache.products.find(x => String(x.id) === String(id));
+    if (p) addToCart(p);
+}
+function posQuickPay(mode) {
+    const subtotal = cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0);
+    const discount = parseFloat(document.getElementById('pos-discount').value) || 0;
+    const taxPercent = parseFloat(document.getElementById('pos-tax').value) || 0;
+    const inv = (subtotal - discount) * (1 + taxPercent / 100);
+    document.getElementById('pos-paid-amount').value = mode === 'cash' ? inv.toFixed(2) : 0;
+    calculateTotals();
+}
+function stepQty(index, d) {
+    if (!cart[index]) return;
+    cart[index].qty = Math.max(1, (parseInt(cart[index].qty) || 1) + d);
+    renderCart();
 }
 
 function selectResult(type, item) {
@@ -716,10 +823,26 @@ function selectResult(type, item) {
         document.getElementById('product-results').style.display = 'none';
     } else {
         selectedCustomer = item;
+        if (db.isRemote && item && item.id) {
+            // another phone may have changed this customer's balance: re-read it
+            db.getById('customers', item.id).then(fresh => {
+                if (!fresh || !selectedCustomer || selectedCustomer.id !== fresh.id) return;
+                selectedCustomer = fresh;
+                applyCustomerPrices();
+                const be = document.getElementById('pos-prev-balance');
+                const br = document.getElementById('pos-prev-balance-row');
+                if (be && br) {
+                    if (fresh.balance && fresh.balance > 0) { br.style.display = 'flex'; be.innerText = fresh.balance.toFixed(2); }
+                    else { br.style.display = 'none'; be.innerText = '0.00'; }
+                    calculateTotals();
+                }
+            }).catch(() => {});
+        }
         document.getElementById('pos-customer-name').value = item.name;
         document.getElementById('pos-customer-phone').value = item.phone;
         document.getElementById('pos-customer-address').value = item.address || '';
         document.getElementById('customer-results').style.display = 'none';
+        applyCustomerPrices();
         
         // Show previous balance
         const balanceRow = document.getElementById('pos-prev-balance-row');
@@ -735,25 +858,64 @@ function selectResult(type, item) {
     }
 }
 
+// ---- Per-customer remembered prices (stored on the customer record: customer.specialPrices = { "<productId>|<unit>": price }) ----
+function spKey(productId, unit) { return String(productId) + '|' + (unit || 'قطعة'); }
+function priceCustomer() {
+    if (selectedCustomer && selectedCustomer.id != null) return selectedCustomer;
+    const inp = document.getElementById('pos-customer-name');
+    const nm = inp ? inp.value.trim() : '';
+    if (!nm) return null;
+    return (state.cache.customers || []).find(c => (c.name || '') === nm) || null;
+}
+function specialPriceFor(productId, unit) {
+    const c = priceCustomer();
+    const v = c && c.specialPrices ? Number(c.specialPrices[spKey(productId, unit)]) : NaN;
+    return isNaN(v) ? null : v;
+}
+// re-price the lines that the seller did not edit by hand (customer picked or changed after adding products)
+function applyCustomerPrices() {
+    let n = 0;
+    cart.forEach(it => {
+        if (it.manualPrice) return;
+        const sp = specialPriceFor(it.id, it.selectedUnit);
+        const master = it.originalPrice != null ? it.originalPrice : it.actualPrice;
+        const target = sp != null ? sp : master;
+        if (Math.abs(target - it.actualPrice) > 0.0001) { it.actualPrice = target; n++; }
+        it.fromCustomer = sp != null && Math.abs(sp - master) > 0.004;
+    });
+    if (n) renderCart();
+    return n;
+}
+
 function addToCart(product) {
+    try {
+        const r = recentIds().filter(id => String(id) !== String(product.id));
+        r.unshift(product.id);
+        localStorage.setItem('az_recent_products', JSON.stringify(r.slice(0, 12)));
+        const fq = JSON.parse(localStorage.getItem('az_freq') || '{}'); fq[product.id] = (fq[product.id] || 0) + 1; localStorage.setItem('az_freq', JSON.stringify(fq));
+    } catch (e) {}
     const existing = cart.find(item => item.id === product.id && item.selectedUnit === (product.unit || 'قطعة'));
     let addedIndex = -1;
     if (existing) {
         existing.qty++;
         addedIndex = cart.indexOf(existing);
     } else {
+        const unitNow = product.unit || 'قطعة';
+        const sp = specialPriceFor(product.id, unitNow);
         cart.push({ 
             ...product, 
             qty: 1, 
-            selectedUnit: product.unit || 'قطعة',
-            actualPrice: product.salePrice,
-            originalPrice: product.salePrice
+            selectedUnit: unitNow,
+            actualPrice: sp != null ? sp : product.salePrice,
+            originalPrice: product.salePrice,
+            fromCustomer: sp != null && Math.abs(sp - product.salePrice) > 0.004
         });
         addedIndex = cart.length - 1;
     }
     renderCart();
 
-    // Auto-focus on unit
+    // Auto-focus on unit (not on phones: it would pop the keyboard)
+    if (window.matchMedia('(max-width: 768px)').matches) { const sb = document.getElementById('pos-recent'); if (sb) renderRecentChips(); return; }
     setTimeout(() => {
         const units = document.querySelectorAll('.pos-unit-input');
         if (units && units[addedIndex]) {
@@ -770,7 +932,7 @@ function removeFromCart(index) {
 // Product Management
 async function renderProducts() {
     const products = state.cache.products;
-    const initialLimit = 100;
+    const initialLimit = window.matchMedia('(max-width: 768px)').matches ? 30 : 100;
     const displayProducts = products.slice(0, initialLimit);
 
     contentArea.innerHTML = `
@@ -823,23 +985,24 @@ async function renderProducts() {
                             <label>اسم المنتج</label>
                             <input type="text" id="prod-name" required>
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>الباركود</label>
                             <input type="text" id="prod-barcode">
                         </div>
                         <div class="input-group">
                             <label>سعر الشراء</label>
-                            <input type="number" id="prod-purchase" step="0.01" value="0">
+                            <input type="number" inputmode="decimal" id="prod-purchase" step="0.01" value="0">
                         </div>
                         <div class="input-group">
                             <label>سعر البيع</label>
-                            <input type="number" id="prod-sale" step="0.01" value="0" required>
+                            <input type="number" inputmode="decimal" id="prod-sale" step="0.01" value="0" required>
                         </div>
                         <div class="input-group">
                             <label>المخزون الحالي</label>
-                            <input type="number" id="prod-stock" value="0">
+                            <input type="number" inputmode="numeric" id="prod-stock" value="0">
                         </div>
-                        <div class="input-group">
+                        <button type="button" class="pos-more-toggle prod-more-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-sliders"></i> تفاصيل أكتر (باركود / وحدة / حد الطلب)</button>
+                        <div class="input-group prod-extra">
                             <label>الوحدة الأساسية</label>
                             <select id="prod-unit">
                                 <option value="قطعة">قطعة</option>
@@ -848,11 +1011,11 @@ async function renderProducts() {
                                 <option value="متر">متر</option>
                             </select>
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>عدد القطع في العلبة</label>
                             <input type="number" id="prod-pieces-per-box" value="1">
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>حد الطلب (الحد الأدنى)</label>
                             <input type="number" id="prod-min" value="5">
                         </div>
@@ -876,7 +1039,7 @@ async function renderProducts() {
 }
 
 function loadMoreProducts(offset) {
-    const limit = 100;
+    const limit = window.matchMedia('(max-width: 768px)').matches ? 30 : 100;
     const products = state.cache.products;
     const nextBatch = products.slice(offset, offset + limit);
     const tbody = document.getElementById('products-list-body');
@@ -895,11 +1058,11 @@ function renderProductRows(products) {
     if (products.length === 0) return '<tr><td colspan="7" style="text-align:center">لا توجد منتجات</td></tr>';
     return products.map(p => `
         <tr class="${p.stock <= p.minStock ? 'low-stock-row' : ''}">
-            <td>${p.barcode}</td>
-            <td>${p.name}</td>
+            <td>${esc(p.barcode)}</td>
+            <td>${esc(p.name)}</td>
             <td>${p.purchasePrice}</td>
             <td>${p.salePrice}</td>
-            <td>${p.unit || 'قطعة'} (${p.piecesPerBox || 1})</td>
+            <td>${esc(p.unit || 'قطعة')} (${p.piecesPerBox || 1})</td>
             <td>${p.stock}</td>
             <td>${p.minStock}</td>
             <td>
@@ -916,10 +1079,10 @@ async function filterProducts(query) {
         p.name.toLowerCase().includes(q) || 
         (p.barcode && p.barcode.includes(q))
     );
-    document.getElementById('products-list-body').innerHTML = renderProductRows(filtered.slice(0, 100));
+    document.getElementById('products-list-body').innerHTML = renderProductRows(filtered.slice(0, window.matchMedia('(max-width: 768px)').matches ? 30 : 100));
     
     const loadMoreBtn = document.getElementById('load-more-products');
-    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > 100 ? 'flex' : 'none';
+    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > (window.matchMedia('(max-width: 768px)').matches ? 30 : 100) ? 'flex' : 'none';
 }
 
 function showProductModal(product = null) {
@@ -958,29 +1121,42 @@ function closeModal(id) {
 async function saveProduct(e) {
     e.preventDefault();
     const id = document.getElementById('prod-id').value;
+    const num = (elId, fallback = 0) => {
+        const v = parseFloat(document.getElementById(elId).value);
+        return Number.isFinite(v) ? v : fallback;
+    };
     const p = {
-        name: document.getElementById('prod-name').value,
-        barcode: document.getElementById('prod-barcode').value,
-        purchasePrice: parseFloat(document.getElementById('prod-purchase').value),
-        salePrice: parseFloat(document.getElementById('prod-sale').value),
-        stock: parseInt(document.getElementById('prod-stock').value),
+        name: document.getElementById('prod-name').value.trim(),
+        barcode: document.getElementById('prod-barcode').value.trim(),
+        purchasePrice: Math.max(0, num('prod-purchase')),
+        salePrice: num('prod-sale'),
+        stock: Math.trunc(num('prod-stock')),
         unit: document.getElementById('prod-unit').value,
-        piecesPerBox: parseInt(document.getElementById('prod-pieces-per-box').value) || 1,
-        minStock: parseInt(document.getElementById('prod-min').value)
+        piecesPerBox: Math.max(1, Math.trunc(num('prod-pieces-per-box', 1)) || 1),
+        minStock: Math.max(0, Math.trunc(num('prod-min')))
     };
 
     if (!p.name) return showToast('ادخل اسم المنتج', 'error');
-    if (!p.salePrice) return showToast('ادخل سعر البيع', 'error');
+    if (!p.salePrice || p.salePrice < 0) return showToast('ادخل سعر البيع', 'error');
+
+    // Barcodes must be unique (the cashier finds products by barcode)
+    if (p.barcode) {
+        const all = await db.getAll('products');
+        const dup = all.find(x => x.barcode === p.barcode && String(x.id) !== String(id));
+        if (dup) return showToast('الباركود ده مستخدم في منتج تاني: ' + dup.name, 'error');
+    }
 
     if (id) {
         p.id = parseInt(id);
-        await db.update('products', p);
+        // Keep fields the form does not edit (category etc.)
+        const old = await db.getById('products', p.id);
+        await db.update('products', { ...(old || {}), ...p });
         showToast('تم تعديل المنتج');
     } else {
-        await db.add('products', p);
+        const newId = await db.add('products', p);
         // Log initial stock
         await db.add('inventoryLog', {
-            productId: p.id || p.barcode, 
+            productId: newId,
             date: new Date().toISOString(),
             qty: p.stock,
             type: 'initial',
@@ -1008,40 +1184,48 @@ function renderCart() {
         const itemTotal = (item.actualPrice * item.qty);
         return `
             <tr>
-                <td>
-                    <div style="font-weight:700">${item.name}</div>
-                    <div style="font-size:0.7rem; color:var(--text-muted)">${item.barcode}</div>
+                <td class="c-name">
+                    <div style="font-weight:700">${esc(item.name)}</div>
+                    <div style="font-size:0.7rem; color:var(--text-muted)">${esc(item.barcode)}</div>
+                    ${item.fromCustomer ? '<div class="sp-badge"><i class="fas fa-tag"></i> سعر العميل</div>' : ''}
                 </td>
-                <td>
+                <td class="c-unit" data-label="الوحدة">
                     <select onchange="updateUnit(${index}, this.value)" 
                         class="table-qty-input pos-unit-input" style="width:70px">
                         <option value="قطعة" ${item.selectedUnit === 'قطعة' ? 'selected' : ''}>قطعة</option>
                         <option value="علبة" ${item.selectedUnit === 'علبة' ? 'selected' : ''}>علبة</option>
                     </select>
                 </td>
-                <td>
-                    <input type="number" value="${item.actualPrice}" 
+                <td class="c-price" data-label="السعر">
+                    <input type="number" inputmode="decimal" value="${item.actualPrice}" 
                         onchange="updatePrice(${index}, this.value)" 
                         onkeydown="if(event.key === 'Enter') { updatePrice(${index}, this.value); setTimeout(() => { const q = document.querySelectorAll('.pos-qty-input')[${index}]; if(q){ q.focus(); q.select(); } }, 0); event.stopPropagation(); event.preventDefault(); }"
                         class="table-qty-input pos-price-input" style="width:70px">
                 </td>
-                <td>
-                    <input type="number" value="${item.qty}" 
-                        onchange="updateQty(${index}, this.value)" 
-                        onkeydown="if(event.key === 'Enter') { updateQty(${index}, this.value); setTimeout(() => { const s = document.getElementById('pos-product-search'); if(s) s.focus(); }, 0); event.stopPropagation(); event.preventDefault(); }"
-                        class="table-qty-input pos-qty-input">
+                <td class="c-qty" data-label="الكمية">
+                    <div class="qty-step">
+                        <button type="button" class="qty-btn" onclick="stepQty(${index}, -1)">&minus;</button>
+                        <input type="number" inputmode="numeric" value="${item.qty}" 
+                            onchange="updateQty(${index}, this.value)" 
+                            onkeydown="if(event.key === 'Enter') { updateQty(${index}, this.value); setTimeout(() => { const s = document.getElementById('pos-product-search'); if(s) s.focus(); }, 0); event.stopPropagation(); event.preventDefault(); }"
+                            class="table-qty-input pos-qty-input">
+                        <button type="button" class="qty-btn" onclick="stepQty(${index}, 1)">+</button>
+                    </div>
                 </td>
-                <td style="font-weight:700">${itemTotal.toFixed(2)}</td>
-                <td><button type="button" class="btn-delete" onclick="removeFromCart(${index})"><i class="fas fa-trash"></i></button></td>
+                <td class="c-total" data-label="الإجمالي" style="font-weight:700">${itemTotal.toFixed(2)}</td>
+                <td class="c-del"><button type="button" class="btn-delete" onclick="removeFromCart(${index})"><i class="fas fa-trash"></i></button></td>
             </tr>
-        `;
+                `;
     }).join('');
     calculateTotals();
+    if (typeof qsRender === 'function') qsRender();
 }
 
 function updatePrice(index, val) {
     const price = parseFloat(val) || 0;
     cart[index].actualPrice = price;
+    cart[index].manualPrice = true;
+    cart[index].fromCustomer = false;
     renderCart();
 }
 
@@ -1055,10 +1239,17 @@ function updateUnit(index, unit) {
     // Auto-adjust prices when switching units
     if (unit === 'علبة' && oldUnit === 'قطعة') {
         item.actualPrice = item.actualPrice * (item.piecesPerBox || 1);
+        if (item.originalPrice != null) item.originalPrice = item.originalPrice * (item.piecesPerBox || 1);
         item.purchasePrice = (Number(item.purchasePrice) || 0) * (item.piecesPerBox || 1);
     } else if (unit === 'قطعة' && oldUnit === 'علبة') {
         item.actualPrice = item.actualPrice / (item.piecesPerBox || 1);
+        if (item.originalPrice != null) item.originalPrice = item.originalPrice / (item.piecesPerBox || 1);
         item.purchasePrice = (Number(item.purchasePrice) || 0) / (item.piecesPerBox || 1);
+    }
+    if (!item.manualPrice) {
+        const sp = specialPriceFor(item.id, unit);
+        if (sp != null) { item.actualPrice = sp; item.fromCustomer = Math.abs(sp - item.originalPrice) > 0.004; }
+        else item.fromCustomer = false;
     }
     
     renderCart();
@@ -1081,6 +1272,7 @@ function calculateTotals() {
     
     document.getElementById('pos-total-before').innerText = subtotal.toFixed(2);
     document.getElementById('pos-final-total').innerText = total.toFixed(2);
+    const bt = document.getElementById('pos-bar-total'); if (bt) bt.innerText = total.toFixed(2);
 }
 
 async function handleSaveInvoice(print = false) {
@@ -1100,6 +1292,7 @@ async function handleSaveInvoice(print = false) {
     try {
         // --- EDIT MODE: Revert old invoice effects (stock + balance) ---
         let oldInvBackup = null;
+        let editOldCustId = null, editOldDelta = 0;
         if (editingInvoiceId) {
             const oldInv = await db.getById('invoices', editingInvoiceId);
             if (oldInv) {
@@ -1117,13 +1310,11 @@ async function handleSaveInvoice(print = false) {
                     }
                 }
                 // 2) Revert Customer Balance
+                // The balance is corrected below by the DIFFERENCE between the old and the new invoice
+                // (never reset to this invoice's remaining: later invoices and payments must stay in the balance).
                 if (oldInv.customer && oldInv.customer.id) {
-                    const customer = await db.getById('customers', oldInv.customer.id);
-                    if (customer) {
-                        const debtToRevert = Number(oldInv.remaining) || 0;
-                        customer.balance = Math.max(0, (Number(customer.balance) || 0) - debtToRevert);
-                        await db.update('customers', customer);
-                    }
+                    editOldCustId = oldInv.customer.id;
+                    editOldDelta = Math.max(0, Number(oldInv.remaining) || 0) - (Number(oldInv.prevBalance) || 0);
                 }
                 // Note: Old invoice will be overwritten by db.update below (same ID)
             }
@@ -1138,14 +1329,14 @@ async function handleSaveInvoice(print = false) {
     const prevBalance = parseFloat(document.getElementById('pos-prev-balance').innerText) || 0;
     const paidAmount = parseFloat(document.getElementById('pos-paid-amount').value) || 0;
     
-    const subTotal = cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0); 
-    const taxAmount = (subTotal - discount) * (taxValue / 100);
-    const finalTotal = subTotal - discount + taxAmount + prevBalance;
-    const remainingBalance = finalTotal - paidAmount;
+    const subTotal = round2(cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0)); 
+    const taxAmount = round2((subTotal - discount) * (taxValue / 100));
+    const finalTotal = round2(subTotal - discount + taxAmount + prevBalance);
+    const remainingBalance = round2(finalTotal - paidAmount);
 
     // Auto-save/update customer
     let customerId = selectedCustomer ? selectedCustomer.id : null;
-    const customerData = {
+    let customerData = {
         name: customerName,
         phone: customerPhone,
         address: customerAddress,
@@ -1153,6 +1344,13 @@ async function handleSaveInvoice(print = false) {
     };
 
     if (customerId) {
+        // Keep every field of the stored customer (initialBalance!) and only change what this sale changes
+        const stored = await db.getById('customers', customerId);
+        customerData = { ...(stored || {}), name: customerName, phone: customerPhone, address: customerAddress, balance: Math.max(0, remainingBalance) };
+        if (editOldCustId && editOldCustId == customerId && stored) {
+            const newDelta = Math.max(0, remainingBalance) - prevBalance;
+            customerData.balance = round2(Math.max(0, (Number(stored.balance) || 0) - editOldDelta + newDelta));
+        }
         customerData.id = customerId;
         await db.update('customers', customerData);
     } else if (customerName) {
@@ -1166,16 +1364,41 @@ async function handleSaveInvoice(print = false) {
         }
 
         if (existing) {
+            customerData = { ...existing, name: customerData.name, phone: customerData.phone, address: customerData.address, balance: customerData.balance };
             customerData.id = existing.id;
             // Since customer was not selected from dropdown, prevBalance was 0 in UI.
             // So remainingBalance is only this invoice's debt. We must add it.
-            customerData.balance = (Number(existing.balance) || 0) + Math.max(0, remainingBalance);
+            customerData.balance = round2((Number(existing.balance) || 0) + Math.max(0, remainingBalance));
             await db.update('customers', customerData);
             customerId = existing.id;
         } else {
             customerId = await db.add('customers', customerData);
         }
     }
+
+        // remember the prices the seller set for this customer (not when editing an old invoice, not for cash sales)
+        if (customerId && !editingInvoiceId) {
+            try {
+                const cs = await db.getById('customers', customerId);
+                if (cs) {
+                    const sp = { ...(cs.specialPrices || {}) };
+                    let changed = false;
+                    cart.forEach(it => {
+                        const master = it.originalPrice != null ? it.originalPrice : it.actualPrice;
+                        const k = spKey(it.id, it.selectedUnit);
+                        const price = round2(Number(it.actualPrice) || 0);
+                        if (Math.abs(price - master) > 0.004) {
+                            if (sp[k] !== price) { sp[k] = price; changed = true; }
+                        } else if (k in sp) { delete sp[k]; changed = true; }
+                    });
+                    if (changed) {
+                        const upd = { ...cs, specialPrices: sp };
+                        if (!Object.keys(sp).length) delete upd.specialPrices;
+                        await db.update('customers', upd);
+                    }
+                }
+            } catch (e) { console.error('remember customer prices failed', e); }
+        }
 
         const invoice = {
             date: (editingInvoiceId && editingInvoiceData) ? editingInvoiceData.date : new Date().toISOString(),
@@ -1184,7 +1407,9 @@ async function handleSaveInvoice(print = false) {
             items: cart.map(item => ({
                 ...item, 
                 salePrice: item.actualPrice, // Use adjusted price
-                total: item.actualPrice * item.qty
+                originalPrice: round2(item.originalPrice != null ? item.originalPrice : item.actualPrice), // master price when the line was added
+                soldPrice: round2(item.actualPrice), // price the customer actually paid
+                total: round2(item.actualPrice * item.qty)
             })),
             subTotal,
             discount,
@@ -1256,7 +1481,7 @@ async function handleSaveInvoice(print = false) {
 // Customer Management
 async function renderCustomers() {
     const customers = state.cache.customers;
-    const initialLimit = 100;
+    const initialLimit = (window.matchMedia('(max-width: 768px)').matches ? 30 : 100);
     const displayCustomers = customers.slice(0, initialLimit);
 
     contentArea.innerHTML = `
@@ -1338,9 +1563,9 @@ function renderCustomerRows(customers) {
     if (customers.length === 0) return '<tr><td colspan="6" style="text-align:center">لا يوجد عملاء</td></tr>';
     return customers.map(c => `
         <tr>
-            <td>${c.name}</td>
-            <td>${c.phone}</td>
-            <td>${c.address || '-'}</td>
+            <td>${esc(c.name)}</td>
+            <td>${esc(c.phone)}</td>
+            <td>${esc(c.address || '-')}</td>
             <td>0.00</td>
             <td>${(c.balance || 0).toFixed(2)}</td>
             <td style="white-space: nowrap;">
@@ -1358,7 +1583,7 @@ function renderCustomerRows(customers) {
 }
 
 function loadMoreCustomers(offset) {
-    const limit = 100;
+    const limit = (window.matchMedia('(max-width: 768px)').matches ? 30 : 100);
     const customers = state.cache.customers;
     const nextBatch = customers.slice(offset, offset + limit);
     const tbody = document.getElementById('customers-list-body');
@@ -1379,10 +1604,10 @@ async function filterCustomers(query) {
         c.name.toLowerCase().includes(q) || 
         (c.phone && c.phone.includes(q))
     );
-    document.getElementById('customers-list-body').innerHTML = renderCustomerRows(filtered.slice(0, 100));
+    document.getElementById('customers-list-body').innerHTML = renderCustomerRows(filtered.slice(0, (window.matchMedia('(max-width: 768px)').matches ? 30 : 100)));
     
     const loadMoreBtn = document.getElementById('load-more-customers');
-    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > 100 ? 'flex' : 'none';
+    if (loadMoreBtn) loadMoreBtn.parentElement.style.display = filtered.length > (window.matchMedia('(max-width: 768px)').matches ? 30 : 100) ? 'flex' : 'none';
 }
 
 function showCustomerModal(customer = null) {
@@ -1412,12 +1637,16 @@ function editCustomer(customer) {
 async function saveCustomer(e) {
     e.preventDefault();
     const id = document.getElementById('customer-id').value;
+    const newInitial = parseFloat(document.getElementById('cust-initial-balance').value) || 0;
+    // Editing a customer must never reset or swap his balance: keep the stored one and only shift it by a changed opening balance
+    const stored = id ? await db.getById('customers', parseInt(id)) : null;
     const c = {
+        ...(stored || {}),
         name: document.getElementById('cust-name').value,
         phone: document.getElementById('cust-phone').value,
         address: document.getElementById('cust-address').value,
-        initialBalance: parseFloat(document.getElementById('cust-initial-balance').value) || 0,
-        balance: (selectedCustomer && id) ? selectedCustomer.balance : (parseFloat(document.getElementById('cust-initial-balance').value) || 0)
+        initialBalance: newInitial,
+        balance: stored ? round2((Number(stored.balance) || 0) + (newInitial - (Number(stored.initialBalance) || 0))) : newInitial
     };
 
     if (!c.name) return showToast('ادخل اسم العميل', 'error');
@@ -1491,7 +1720,7 @@ async function renderWarehouse() {
                         <div class="input-group">
                             <label>المنتج</label>
                             <select id="stock-prod-id" required>
-                                ${products.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                                ${products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}
                             </select>
                         </div>
                         <div class="input-group">
@@ -1570,10 +1799,10 @@ function renderInventoryLogs(logs, products) {
         return `
             <tr>
                 <td>${new Date(log.date).toLocaleString('ar-EG')}</td>
-                <td>${product ? product.name : 'منتج محذوف'}</td>
+                <td>${esc(product ? product.name : 'منتج محذوف')}</td>
                 <td class="${typeClass}">${log.qty > 0 ? '+' : ''}${log.qty}</td>
                 <td>${typeLabel}</td>
-                <td>${log.ref || '-'}</td>
+                <td>${esc(log.ref || '-')}</td>
             </tr>
         `;
     }).join('');
@@ -1588,10 +1817,11 @@ async function saveStockEntry(e) {
     const prodId = parseInt(document.getElementById('stock-prod-id').value);
     const qty = parseInt(document.getElementById('stock-qty').value);
     const ref = document.getElementById('stock-ref').value;
+    if (!Number.isFinite(qty) || qty === 0) return showToast('أدخل كمية صحيحة', 'error');
     
     const p = await db.getById('products', prodId);
     if (p) {
-        p.stock += qty;
+        p.stock = (Number(p.stock) || 0) + qty;
         await db.update('products', p);
         
         await db.add('inventoryLog', {
@@ -1671,10 +1901,10 @@ function renderAgentRows(agents) {
     if (agents.length === 0) return '<tr><td colspan="6" style="text-align:center">لا يوجد مناديب</td></tr>';
     return agents.map(a => `
         <tr>
-            <td>${a.name}</td>
-            <td>${a.phone}</td>
-            <td>${a.address || '-'}</td>
-            <td>${a.commission}%</td>
+            <td>${esc(a.name)}</td>
+            <td>${esc(a.phone)}</td>
+            <td>${esc(a.address || '-')}</td>
+            <td>${a.commission || 0}%</td>
             <td>0.00</td>
             <td>
                 <button class="btn-edit" onclick="editAgent(${JSON.stringify(a).replace(/"/g, '&quot;')})" title="تعديل"><i class="fas fa-edit"></i> تعديل</button>
@@ -1695,7 +1925,7 @@ function showAgentModal(agent = null) {
         document.getElementById('agent-name').value = agent.name;
         document.getElementById('agent-phone').value = agent.phone;
         document.getElementById('agent-address').value = agent.address;
-        document.getElementById('agent-commission').value = agent.commission;
+        document.getElementById('agent-commission').value = agent.commission || 0;
     } else {
         title.innerText = 'إضافة مندوب جديد';
         form.reset();
@@ -1715,7 +1945,7 @@ async function saveAgent(e) {
         name: document.getElementById('agent-name').value,
         phone: document.getElementById('agent-phone').value,
         address: document.getElementById('agent-address').value,
-        commission: parseFloat(document.getElementById('agent-commission').value)
+        commission: parseFloat(document.getElementById('agent-commission').value) || 0
     };
 
     if (id) {
@@ -1809,9 +2039,9 @@ function renderExpenseRows(expenses) {
     return sorted.map(e => `
         <tr>
             <td>${new Date(e.date).toLocaleDateString('ar-EG')}</td>
-            <td>${e.category}</td>
+            <td>${esc(e.category)}</td>
             <td class="text-danger">${e.amount.toFixed(2)}</td>
-            <td>${e.note || '-'}</td>
+            <td>${esc(e.note || '-')}</td>
             <td>
                 <button class="btn-delete" onclick="deleteExpense(${e.id})" title="حذف"><i class="fas fa-trash"></i> حذف</button>
             </td>
@@ -1831,6 +2061,7 @@ async function saveExpense(e) {
         amount: parseFloat(document.getElementById('exp-amount').value),
         note: document.getElementById('exp-note').value
     };
+    if (!Number.isFinite(expense.amount) || expense.amount <= 0) return showToast('أدخل مبلغ مصروف صحيح', 'error');
     await db.add('expenses', expense);
     closeModal('expense-modal');
     renderExpenses();
@@ -1853,14 +2084,16 @@ async function renderReports() {
     const startDate = monthPrefix + '-01';
     const endDate = monthPrefix + '-31';
 
-    const invoices = (await db.getByDateRange('invoices', startDate, endDate)) || [];
+    const prevDay = new Date(new Date(startDate + 'T12:00:00').getTime() - 86400000).toLocaleDateString('en-CA');
+    const invoices = ((await db.getByDateRange('invoices', prevDay, endDate)) || []).filter(inv => invDate(inv).startsWith(monthPrefix));
     const expenses = (await db.getByDateRange('expenses', startDate, endDate)) || [];
     const payments = (await db.getByDateRange('customerPayments', startDate, endDate)) || [];
     const customers = await db.getAll('customers');
     
-    const totalSales = invoices.reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const totalSales = invoices.reduce((sum, inv) => sum + invSales(inv), 0);
     const totalExpenses = expenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0);
-    const netProfit = totalSales - totalExpenses;
+    // Real profit: item margins (sale price minus purchase price) minus discounts, minus expenses
+    const netProfit = invoices.reduce((sum, inv) => sum + invProfit(inv), 0) - totalExpenses;
     
     contentArea.innerHTML = `
         <div class="page-header">
@@ -1907,6 +2140,8 @@ async function renderReports() {
                 </div>
             ` : ''}
         </div>
+
+        ${renderPriceChangesCard(invoices)}
 
         <div class="card reports-table-card" style="margin-top: 2rem">
             <div class="table-actions" style="margin-bottom: 1rem; display: flex; gap: 10px; align-items: center;">
@@ -1956,7 +2191,7 @@ function renderInvoiceReportRows(invoices) {
         <tr>
             <td>#${inv?.id ?? '-'}</td>
             <td>${inv?.date ? new Date(inv.date).toLocaleString('ar-EG') : '-'}</td>
-            <td>${inv?.customer?.name || inv?.customerName || 'غير محدد'}</td>
+            <td>${esc(inv?.customer?.name || inv?.customerName || 'غير محدد')}</td>
             <td>${fmt2(inv?.total)}</td>
             <td>${fmt2(inv?.paid)}</td>
             <td>${fmt2(inv?.remaining)}</td>
@@ -2005,14 +2240,24 @@ async function voidInvoice(id) {
         if (inv.customer && inv.customer.id) {
             const customer = await db.getById('customers', inv.customer.id);
             if (customer) {
-                // inv.remaining represents the debt added to the customer balance
-                const debtToRevert = Number(inv.remaining) || 0;
-                customer.balance = Math.max(0, (Number(customer.balance) || 0) - debtToRevert);
+                // inv.remaining includes the customer's older balance (prevBalance) that was
+                // already owed before this invoice. Only revert the debt this invoice created.
+                // The invoice moved the balance by (remaining, floored at 0) minus the older balance it
+                // carried. That can be negative when the customer paid down old debt, so undo the real delta.
+                const balanceDelta = Math.max(0, Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0);
+                customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - balanceDelta));
                 await db.update('customers', customer);
             }
         }
 
-        // 3) Delete Invoice
+        // 3) Delete the invoice's return records too (their stock is already back, and the
+        //    ledger must not keep a return for an invoice that no longer exists)
+        const allReturnsForVoid = await db.getAll('returns');
+        for (const r of allReturnsForVoid.filter(r => r.invoiceId == id)) {
+            await db.delete('returns', r.id);
+        }
+
+        // 4) Delete Invoice
         await db.delete('invoices', id);
         
         showToast('تم حذف الفاتورة واسترجاع المخزون وتعديل الحساب بنجاح');
@@ -2038,7 +2283,7 @@ async function filterInvoicesInReports() {
         filtered = all.filter(inv => {
             const matchesId = inv.id.toString() === query;
             const matchesName = (inv.customer?.name || inv.customerName || '').toLowerCase().includes(query);
-            const matchesDate = !dateQuery || inv.date.startsWith(dateQuery);
+            const matchesDate = !dateQuery || invDate(inv) === dateQuery;
             const matchesQuery = !query || matchesId || matchesName;
             
             return matchesQuery && matchesDate;
@@ -2055,9 +2300,9 @@ function renderPaymentReportRows(payments) {
         <tr>
             <td>#${p.id}</td>
             <td>${new Date(p.date).toLocaleString('ar-EG')}</td>
-            <td>${p.customer?.name || p.customerName || 'عميل'}</td>
+            <td>${esc(p.customer?.name || p.customerName || 'عميل')}</td>
             <td class="text-success" style="font-weight:700">${p.amount.toFixed(2)}</td>
-            <td>${p.note || '-'}</td>
+            <td>${esc(p.note || '-')}</td>
             <td>
                 <button class="btn-edit" title="تعديل" style="padding: 4px 8px;" onclick="editPayment('customer', ${p.id})"><i class="fas fa-edit"></i></button>
                 <button class="btn-edit" title="طباعة الوصل" style="padding: 4px 8px;" onclick="reprintPaymentReceipt(${JSON.stringify(p).replace(/"/g, '&quot;')})"><i class="fas fa-print"></i></button>
@@ -2094,25 +2339,17 @@ async function reprintInvoice(id) {
 
 async function printLastInvoice() {
     try {
-        const transaction = db.db.transaction('invoices', 'readonly');
-        const store = transaction.objectStore('invoices');
-        const req = store.openCursor(null, 'prev');
-        
-        req.onsuccess = (e) => {
-            const cursor = e.target.result;
-            if (cursor && cursor.value) {
-                printThermalInvoice(cursor.value, cursor.value.id);
-                showToast('جاري طباعة آخر فاتورة...');
-            } else {
-                showToast('لا توجد فواتير سابقة لطباعتها', 'warning');
-            }
-        };
-        req.onerror = () => {
-            showToast('حدث خطأ أثناء تحميل إخر فاتورة', 'error');
-        };
+        const all = await db.getAll('invoices');
+        const last = all[all.length - 1];
+        if (last) {
+            printThermalInvoice(last, last.id);
+            showToast('جاري طباعة آخر فاتورة...');
+        } else {
+            showToast('لا توجد فواتير سابقة لطباعتها', 'warning');
+        }
     } catch (e) {
         console.error("Print Last Invoice Error: ", e);
-        showToast('فشل في الوصول لقاعدة البيانات لطباعة الفاتورة', 'error');
+        showToast('حدث خطأ أثناء تحميل آخر فاتورة', 'error');
     }
 }
 
@@ -2122,9 +2359,9 @@ async function viewInvoiceDetails(id) {
 
     const itemsHtml = inv.items.map(it => `
         <tr>
-            <td style="padding: 4px 8px; text-align:right;">${it.name}</td>
+            <td style="padding: 4px 8px; text-align:right;">${esc(it.name)}</td>
             <td style="padding: 4px 8px; text-align:center;">${it.qty}</td>
-            <td style="padding: 4px 8px; text-align:center;">${Number(it.salePrice).toFixed(2)}</td>
+            <td style="padding: 4px 8px; text-align:center;">${Number(it.salePrice).toFixed(2)}${(it.originalPrice != null && Math.abs(Number(it.originalPrice) - Number(it.salePrice)) > 0.001) ? `<div style="font-size:0.7rem;color:var(--text-muted)">الأصلي ${Number(it.originalPrice).toFixed(2)}</div>` : ''}${it.belowCost ? '<div style="font-size:0.7rem;color:var(--danger)">أقل من التكلفة</div>' : ''}</td>
             <td style="padding: 4px 8px; text-align:center; font-weight:700;">${(it.qty * it.salePrice).toFixed(2)}</td>
         </tr>`).join('');
 
@@ -2138,7 +2375,7 @@ async function viewInvoiceDetails(id) {
                 <button class="modal-close" onclick="this.closest('.modal').remove()">&times;</button>
             </div>
             <div class="modal-body">
-                <p><strong>العميل:</strong> ${inv.customer?.name || 'نقدي'}</p>
+                <p><strong>العميل:</strong> ${esc(inv.customer?.name || 'نقدي')}</p>
                 <p><strong>التاريخ:</strong> ${new Date(inv.date).toLocaleString('ar-EG')}</p>
                 <table class="modern-table" style="width:100%; margin-top:1rem;">
                     <thead><tr>
@@ -2191,7 +2428,7 @@ function getReturnMaxQty(idx) {
 
 function getReturnPrice(idx) {
     const it = returnModalState?.inv?.items?.[idx];
-    return Number(it?.salePrice) || 0;
+    return Number(it?.actualPrice ?? it?.salePrice) || 0;
 }
 
 function setReturnQty(idx, qty) {
@@ -2275,7 +2512,7 @@ async function showReturnModal(invoiceId) {
     const items = Array.isArray(inv.items) ? inv.items : [];
     const rows = items.map((it, idx) => `
         <tr>
-            <td style="text-align:right; font-weight:700;">${it.name || '-'}</td>
+            <td style="text-align:right; font-weight:700;">${esc(it.name || '-')}</td>
             <td style="text-align:center">${format2(it.salePrice)}</td>
             <td style="text-align:center">${Number(it.qty) || 0}</td>
             <td style="text-align:center">
@@ -2304,8 +2541,8 @@ async function showReturnModal(invoiceId) {
         <div class="modal-content return-modal-content" style="max-width: 980px;">
             <h3>مرتجع من الفاتورة #${invoiceId}</h3>
             <div style="margin: 0.5rem 0; color: var(--text-muted); font-size: 0.9rem;">
-                العميل: <b>${inv?.customer?.name || 'غير محدد'}</b>
-                ${inv?.customer?.phone ? ` - هاتف: ${inv.customer.phone}` : ''}
+                العميل: <b>${esc(inv?.customer?.name || 'غير محدد')}</b>
+                ${inv?.customer?.phone ? ` - هاتف: ${esc(inv.customer.phone)}` : ''}
             </div>
             <div class="return-toolbar">
                 <button type="button" class="btn btn-new" onclick="setAllReturnQty('max')"><i class="fas fa-check-double"></i> إرجاع الكل</button>
@@ -2374,10 +2611,10 @@ async function confirmReturn(invoiceId) {
             productId: it.id,
             name: it.name,
             barcode: it.barcode,
-            salePrice: Number(it.salePrice) || 0,
+            salePrice: Number(it.actualPrice ?? it.salePrice) || 0,
             purchasePrice: Number(it.purchasePrice) || 0,
             qty: safeQty,
-            total: safeQty * (Number(it.salePrice) || 0)
+            total: round2(safeQty * (Number(it.actualPrice ?? it.salePrice) || 0))
         });
     });
 
@@ -2387,9 +2624,19 @@ async function confirmReturn(invoiceId) {
     }
 
     const reason = document.getElementById('return-reason')?.value || '';
-    const returnTotal = returnItems.reduce((s, it) => s + (Number(it.total) || 0), 0);
+    const returnTotal = round2(returnItems.reduce((s, it) => s + (Number(it.total) || 0), 0));
 
-    if (!confirm(`تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟`)) return;
+    // Split the return: first it cancels the debt THIS invoice created, the rest is cash given back
+    const ownDebtLeft = Math.max(0, round2((Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0)));
+    let custForReturn = inv?.customer?.id ? await db.getById('customers', inv.customer.id) : null;
+    const custBalance = custForReturn ? (Number(custForReturn.balance) || 0) : 0;
+    const debtReduction = round2(Math.min(returnTotal, ownDebtLeft, custForReturn ? custBalance : ownDebtLeft));
+    const cashRefund = round2(returnTotal - debtReduction);
+
+    const confirmMsg = cashRefund > 0
+        ? `تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟\nمنهم ${debtReduction.toFixed(2)} بيتخصموا من دين العميل، و ${cashRefund.toFixed(2)} كاش بيترد للعميل من الدرج.`
+        : `تأكيد مرتجع بقيمة ${returnTotal.toFixed(2)} ؟\nكله بيتخصم من دين العميل.`;
+    if (!confirm(confirmMsg)) return;
 
     const confirmBtn = document.getElementById('return-confirm-btn');
     if (confirmBtn) confirmBtn.disabled = true;
@@ -2403,6 +2650,8 @@ async function confirmReturn(invoiceId) {
         agentId: inv?.agentId || null,
         items: returnItems,
         total: returnTotal,
+        debtReduction,
+        cashRefund,
         reason,
         createdAt: new Date().toISOString()
     });
@@ -2429,7 +2678,7 @@ async function confirmReturn(invoiceId) {
         const c = await db.getById('customers', custId);
         if (c) {
             const current = Number(c.balance) || 0;
-            c.balance = Math.max(0, current - returnTotal);
+            c.balance = round2(Math.max(0, current - debtReduction));
             await db.update('customers', c);
         }
     }
@@ -2440,19 +2689,21 @@ async function confirmReturn(invoiceId) {
             const itemMatch = inv.items.find(it => it.id === log.productId);
             if (itemMatch) {
                 itemMatch.qty = Math.max(0, (Number(itemMatch.qty) || 0) - (Number(log.qty) || 0));
-                itemMatch.total = Math.max(0, (Number(itemMatch.total) || 0) - (Number(log.total) || 0));
+                itemMatch.total = round2(Math.max(0, (Number(itemMatch.total) || 0) - (Number(log.total) || 0)));
             }
         }
         // Remove fully returned items from the invoice's item list
         inv.items = inv.items.filter(it => it.qty > 0);
     }
-    inv.total = Math.max(0, (Number(inv.total) || 0) - returnTotal);
+    inv.total = round2(Math.max(0, (Number(inv.total) || 0) - returnTotal));
+    // Keep the invoice's remaining debt in step with the return so a later void reverts the right amount
+    inv.remaining = round2(Math.max(0, (Number(inv.remaining) || 0) - debtReduction));
     // Adjust subtotal to maintain accuracy if reprinted
-    inv.subTotal = Math.max(0, (Number(inv.subTotal) || 0) - returnTotal);
+    inv.subTotal = round2(Math.max(0, (Number(inv.subTotal) || 0) - returnTotal));
     await db.update('invoices', inv);
 
     closeReturnModal();
-    alert(`تم تسجيل المرتجع #${returnId} بنجاح\nوتم تعديل الفاتورة الأصلية لضبط المبيعات والدرج تلقائياً`);
+    alert(`تم تسجيل المرتجع #${returnId} بنجاح\nوتم تعديل الفاتورة الأصلية لضبط المبيعات تلقائياً` + (cashRefund > 0 ? `\nرد كاش للعميل: ${cashRefund.toFixed(2)} (اتسجل في الدرج وتقفيلة المندوب)` : ''));
     
     // Refresh Reports UI to reflect updated invoice total
     if (typeof loadPage === 'function' && state.currentPage === 'reports') {
@@ -2581,6 +2832,13 @@ async function renderSettings() {
                 </div>
             </div>
 
+            ${db.isRemote ? `
+            <div class="card settings-card" style="grid-column: 1 / -1;">
+                <h3>المستخدمون (المدير والبياعين)</h3>
+                <p>كل بياع له اسم مستخدم وكلمة سر، ويبيع من موبايله والفواتير بتتسجل في نفس النظام لحظيًا. البياع مش بيقدر يلغي فواتير ولا يعدل سعر المنتج ولا يشوف التكلفة والأرباح.</p>
+                <div id="users-card-body">...</div>
+            </div>` : ''}
+
             <div class="card settings-card" style="border: 1px solid var(--danger);">
                 <h3 style="color: var(--danger);">تهيئة النظام (ضبط المصنع)</h3>
                 <p>سيتم حذف جميع البيانات الموجودة في النظام (المنتجات، العملاء، الفواتير، المصاريف). يرجى التأكد من عمل نسخة احتياطية أولاً.</p>
@@ -2599,6 +2857,7 @@ async function renderSettings() {
             </div>
         </div>
     `;
+    if (db.isRemote) renderUsersCard();
 }
 
 async function exportData() {
@@ -2624,7 +2883,7 @@ async function exportData() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `AbuZamel_Backup_${new Date().toLocaleDateString()}.json`;
+    a.download = `AbuZamel_Backup_${new Date().toLocaleDateString('en-CA')}.json`;
     a.click();
 }
 
@@ -2633,16 +2892,50 @@ async function importData(event) {
     if (!file) return;
 
     const reader = new FileReader();
+    reader.onerror = () => alert('مقدرتش أقرا الملف. جرّب تختاره تاني.');
     reader.onload = async (e) => {
+        let step = 'قراءة الملف';
         try {
-            const data = JSON.parse(e.target.result);
-            if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية. هل أنت متأكد؟')) {
+            let text = String(e.target.result || '').replace(/^\uFEFF/, '').trim();
+            let data;
+            try { data = JSON.parse(text); }
+            catch (pe) { alert('الملف مش JSON صالح (' + pe.message + '). لازم تختار ملف النسخة الاحتياطية اللي نزل من "تصدير نسخة احتياطية" في النسخة القديمة، بامتداد .json.'); return; }
+            // Some exports wrap the data: { data: {...} }
+            if (data && !Array.isArray(data) && typeof data === 'object' && data.data && typeof data.data === 'object' && !Array.isArray(data.data)) data = data.data;
+            // Validate BEFORE deleting anything: a wrong file must never wipe the current data
+            const knownStores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
+            const looksLikeBackup = data && typeof data === 'object' && !Array.isArray(data) &&
+                knownStores.some(k => Array.isArray(data[k])) &&
+                knownStores.every(k => data[k] === undefined || data[k] === null || Array.isArray(data[k]));
+            if (!looksLikeBackup) {
+                alert('الملف ده مش نسخة احتياطية صالحة للنظام (مفيش فيه منتجات/عملاء/فواتير بالشكل المعروف). محدش اتمسح.');
+                return;
+            }
+            knownStores.forEach(k => { if (data[k] === null) delete data[k]; });
+            const summary = knownStores.filter(k => Array.isArray(data[k]) && data[k].length).map(k => k + ': ' + data[k].length).join('\n');
+            if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية:\n' + summary + '\nهل أنت متأكد؟')) {
+                step = 'رفع البيانات';
+                if (db.isRemote) {
+                    const ov = document.createElement('div');
+                    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(5,10,25,.88);display:flex;align-items:center;justify-content:center;color:#fff;font-family:inherit;direction:rtl;text-align:center;padding:20px';
+                    ov.innerHTML = '<div><div style="font-size:1.3rem;font-weight:800;margin-bottom:12px">جاري استعادة البيانات... لا تقفل الصفحة</div><div id="az-imp-p" style="font-size:1.1rem">0 / ' + knownStores.reduce((t, k) => t + (Array.isArray(data[k]) ? data[k].length : 0), 0) + '</div></div>';
+                    document.body.appendChild(ov);
+                    let counts;
+                    try {
+                        counts = await db.importAll(data, (st, n, tot) => { const el = document.getElementById('az-imp-p'); if (el) el.textContent = n + ' / ' + tot + '  (' + st + ')'; });
+                    } finally { ov.remove(); }
+                    const failed = counts.__failed || []; delete counts.__failed;
+                    let msg = 'تمت استعادة البيانات!\n' + Object.entries(counts).filter(([k, v]) => v > 0).map(([k, v]) => k + ': ' + v).join('\n');
+                    if (failed.length) msg += '\n\nتعذر استيراد ' + failed.length + ' سجل:\n' + failed.slice(0, 8).map(f => f.store + ' #' + f.key + ' (' + f.error + ')').join('\n');
+                    alert(msg);
+                    location.reload();
+                    return;
+                }
                 // Clear and rebuild (IndexedDB)
                 await db.clearAllStores();
 
                 // Restore with IDs to keep relationships consistent
-                const stores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
-                for (const store of stores) {
+                for (const store of knownStores) {
                     const rows = Array.isArray(data[store]) ? data[store] : [];
                     for (const item of rows) {
                         // put() keeps provided id when keyPath is id
@@ -2653,9 +2946,14 @@ async function importData(event) {
                 location.reload();
             }
         } catch (error) {
-        console.error('Import failed:', error);
-        alert('فشل استيراد البيانات. يرجى التأكد من صحة الملف.');
-    }
+            console.error('Import failed at ' + step + ':', error);
+            const m = String((error && error.message) || error);
+            let why = m;
+            if (/owner_only/.test(m)) why = 'الحساب ده مش حساب المدير. الاستعادة للمدير بس.';
+            else if (/not_authorized|401/.test(m)) why = 'الجلسة انتهت. سجّل دخول تاني وجرب.';
+            else if (/57014|timeout|canceling statement/i.test(m)) why = 'السيرفر أخد وقت طويل. جرّب تاني.';
+            alert('فشل استيراد البيانات (' + step + '): ' + why);
+        }
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -2681,7 +2979,7 @@ async function renderSuppliers() {
         items: []
     };
 
-    const supplierOpts = (suppliers || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    const supplierOpts = (suppliers || []).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
     const recentPurchases = (purchases || []).slice(-20).reverse();
 
     contentArea.innerHTML = `
@@ -2716,9 +3014,9 @@ async function renderSuppliers() {
                     <tbody>
                         ${(suppliers || []).length ? suppliers.map(s => `
                             <tr>
-                                <td style="font-weight:800;">${s.name}</td>
-                                <td>${s.phone || '-'}</td>
-                                <td>${s.address || '-'}</td>
+                                <td style="font-weight:800;">${esc(s.name)}</td>
+                                <td>${esc(s.phone || '-')}</td>
+                                <td>${esc(s.address || '-')}</td>
                                 <td>${(Number(purchasesBySupplier[s.id]) || 0).toFixed(2)}</td>
                                 <td style="font-weight:800; color: var(--danger);">${((s.balance || 0) + (s.initialBalance || 0)).toFixed(2)} ج.م</td>
                                 <td style="white-space: nowrap;">
@@ -2837,7 +3135,7 @@ async function renderSuppliers() {
                                   <tr>
                                     <td>#${p.id}</td>
                                     <td>${p.date ? new Date(p.date).toLocaleDateString('ar-EG') : '-'}</td>
-                                    <td>${s ? s.name : `مورد #${p.supplierId}`}</td>
+                                    <td>${s ? esc(s.name) : `مورد #${p.supplierId}`}</td>
                                     <td>${Array.isArray(p.items) ? p.items.length : 0}</td>
                                     <td style="font-weight:900;">${(Number(p.totalCost)||0).toFixed(2)}</td>
                                   </tr>
@@ -2918,7 +3216,7 @@ function supSearchProducts(query) {
     }
     results.innerHTML = list.map(p => `
       <div class="result-item" onclick="supSelectProduct(${p.id})">
-        ${p.name} <span style="opacity:.7;">(مخزون: ${p.stock})</span>
+        ${esc(p.name)} <span style="opacity:.7;">(مخزون: ${p.stock})</span>
       </div>
     `).join('');
     results.style.display = 'block';
@@ -2937,7 +3235,7 @@ function supSelectProduct(productId) {
     if (input) input.value = p.name;
     if (chip) {
         chip.style.display = 'block';
-        chip.innerHTML = `تم اختيار: <b>${p.name}</b> <span style="opacity:.7;">(باركود: ${p.barcode || '-'})</span> <button type="button" class="return-chip" style="margin-right:8px;" onclick="supClearSelected()">تغيير</button>`;
+        chip.innerHTML = `تم اختيار: <b>${esc(p.name)}</b> <span style="opacity:.7;">(باركود: ${esc(p.barcode || '-')})</span> <button type="button" class="return-chip" style="margin-right:8px;" onclick="supClearSelected()">تغيير</button>`;
     }
     const price = document.getElementById('sup-price');
     if (price && (!Number(price.value) || Number(price.value) === 0)) {
@@ -2986,7 +3284,7 @@ function supRenderItems() {
 
     body.innerHTML = st.items.map((it, i) => `
       <tr>
-        <td style="font-weight:800;">${it.name}</td>
+        <td style="font-weight:800;">${esc(it.name)}</td>
         <td>${it.qty}</td>
         <td>${Number(it.purchasePrice).toFixed(2)}</td>
         <td style="font-weight:900;">${Number(it.total).toFixed(2)}</td>
@@ -3032,7 +3330,7 @@ async function supSavePurchase() {
     if (!supplierId) return alert('اختر المورد');
     const date = document.getElementById('sup-purchase-date')?.value || new Date().toLocaleDateString('en-CA');
     const note = document.getElementById('sup-purchase-note')?.value || '';
-    const totalCost = st.items.reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const totalCost = round2(st.items.reduce((s, x) => s + (Number(x.total) || 0), 0));
     const paidAmount = parseFloat(document.getElementById('sup-paid')?.value) || 0;
     const remainingAmount = totalCost - paidAmount;
 
@@ -3061,7 +3359,7 @@ async function supSavePurchase() {
     if (remainingAmount !== 0) {
         const supplier = await db.getById('suppliers', supplierId);
         if (supplier) {
-            supplier.balance = (supplier.balance || 0) + remainingAmount;
+            supplier.balance = round2((supplier.balance || 0) + remainingAmount);
             await db.update('suppliers', supplier);
         }
     }
@@ -3179,8 +3477,8 @@ async function showPurchaseModal() {
     modal.style.display = 'flex';
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 
-    const supplierOpts = suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-    const productOpts = products.map(p => `<option value="${p.id}">${p.name} (مخزون: ${p.stock})</option>`).join('');
+    const supplierOpts = suppliers.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    const productOpts = products.map(p => `<option value="${p.id}">${esc(p.name)} (مخزون: ${p.stock})</option>`).join('');
 
     modal.innerHTML = `
       <div class="modal-content" style="max-width: 900px;">
@@ -3281,7 +3579,7 @@ function renderPurchaseItems() {
 
     body.innerHTML = st.items.map((it, i) => `
       <tr>
-        <td>${it.name}</td>
+        <td>${esc(it.name)}</td>
         <td>${it.qty}</td>
         <td>${it.purchasePrice.toFixed(2)}</td>
         <td>${it.total.toFixed(2)}</td>
@@ -3308,7 +3606,7 @@ async function savePurchase() {
     const date = document.getElementById('purchase-date').value || new Date().toLocaleDateString('en-CA');
     const note = document.getElementById('purchase-note').value || '';
     const paid = parseFloat(document.getElementById('purchase-paid')?.value) || 0;
-    const totalCost = st.items.reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const totalCost = round2(st.items.reduce((s, x) => s + (Number(x.total) || 0), 0));
 
     const purchase = {
         date: new Date(date).toISOString(),
@@ -3347,8 +3645,8 @@ async function savePurchase() {
     if (supplierId) {
         const supplier = await db.getById('suppliers', supplierId);
         if (supplier) {
-            const remaining = totalCost - paid;
-            supplier.balance = (Number(supplier.balance) || 0) + Math.max(0, remaining);
+            const remaining = round2(totalCost - paid);
+            supplier.balance = round2((Number(supplier.balance) || 0) + Math.max(0, remaining));
             await db.update('suppliers', supplier);
         }
     }
@@ -3394,8 +3692,8 @@ async function renderAudit() {
             <tbody id="audit-body">
               ${(products || []).length ? products.map((p,i)=>`
                 <tr>
-                  <td style="font-weight:800;">${p.name}</td>
-                  <td>${p.barcode || '-'}</td>
+                  <td style="font-weight:800;">${esc(p.name)}</td>
+                  <td>${esc(p.barcode || '-')}</td>
                   <td id="audit-sys-${p.id}">${Number(p.stock)||0}</td>
                   <td>
                     <input class="table-qty-input" style="width:90px;" type="number" value="${Number(p.stock)||0}"
@@ -3430,7 +3728,9 @@ async function saveAudit(applyAdjustments) {
 
     for (const p of (products || [])) {
         const sys = Number(p.stock) || 0;
-        const counted = Number(document.getElementById(`audit-count-${p.id}`)?.value) || 0;
+        // An empty box means "not counted": keep the system quantity instead of zeroing the stock
+        const rawCount = document.getElementById(`audit-count-${p.id}`)?.value;
+        const counted = (rawCount === undefined || rawCount === null || String(rawCount).trim() === '') ? sys : (Number(rawCount) || 0);
         const diff = counted - sys;
         entries.push({ productId: p.id, name: p.name, barcode: p.barcode, system: sys, counted, diff });
     }
@@ -3478,6 +3778,7 @@ async function handleFactoryReset() {
 async function renderSettlement() {
     const agents = await db.getAll('agents');
     const invoices = await db.getAll('invoices');
+    const returns = await db.getAll('returns');
     const today = new Date().toLocaleDateString('en-CA');
     const dayClosures = await db.getAll('dayClosures');
     const isClosed = (dayClosures || []).some(c => c?.date === today);
@@ -3493,7 +3794,7 @@ async function renderSettlement() {
         </div>
 
         <div id="settlement-stats-container">
-            ${renderSettlementStats(agents, invoices, today)}
+            ${renderSettlementStats(agents, invoices, today, returns)}
         </div>
 
         <div id="settlement-entry-container">
@@ -3517,7 +3818,7 @@ async function renderSettlement() {
                     </tr>
                 </thead>
                 <tbody id="settlement-table-body">
-                    ${renderSettlementRows(agents, invoices, today)}
+                    ${renderSettlementRows(agents, invoices, today, returns)}
                 </tbody>
             </table>
         </div>
@@ -3542,13 +3843,14 @@ async function closeDay() {
     renderSettlement();
 }
 
-function sumPaidForAgent(invoices, agentId, date) {
-    const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && inv?.date && inv.date.startsWith(date));
-    return dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0);
+function sumPaidForAgent(invoices, agentId, date, returns = []) {
+    const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && invDate(inv) === date);
+    // Cash collected on invoices that day, minus cash given back for returns that day
+    return round2(dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0) - cashRefundsOn(returns, date, agentId));
 }
 
 function renderSettlementEntryCard(agents, invoices, date) {
-    const opts = (agents || []).map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+    const opts = (agents || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
     return `
         <div class="card" style="margin-top: 1.5rem;">
             <h3 style="margin-bottom: 1rem;">تقفيل مندوب</h3>
@@ -3604,10 +3906,11 @@ async function recalcSettlementDiff() {
     }
 
     const invoices = await db.getAll('invoices');
-    const expected = sumPaidForAgent(invoices, agentId, date);
+    const returns = await db.getAll('returns');
+    const expected = sumPaidForAgent(invoices, agentId, date, returns);
     expectedEl.value = expected.toFixed(2);
 
-    const diff = received - expected; // + زيادة / - عجز
+    const diff = round2(received - expected); // + زيادة / - عجز
     if (Math.abs(diff) < 0.005) {
         statusEl.value = `تمام (0.00)`;
     } else if (diff < 0) {
@@ -3627,8 +3930,9 @@ async function saveAgentSettlement() {
     if (!agentId) return alert('اختر المندوب');
 
     const invoices = await db.getAll('invoices');
-    const expected = sumPaidForAgent(invoices, agentId, date);
-    const diff = received - expected;
+    const returns = await db.getAll('returns');
+    const expected = sumPaidForAgent(invoices, agentId, date, returns);
+    const diff = round2(received - expected);
     const status = Math.abs(diff) < 0.005 ? 'ok' : diff < 0 ? 'shortage' : 'surplus';
 
     await db.add('settlements', {
@@ -3648,11 +3952,12 @@ async function saveAgentSettlement() {
 
 // sumPaidForAgent defined above (L3559)
 
-function renderSettlementStats(agents, invoices, date) {
-    const todayInvoices = invoices.filter(inv => inv.date && inv.date.startsWith(date));
-    const totalSales = todayInvoices.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
-    const totalPaid = todayInvoices.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
-    const totalRemaining = todayInvoices.reduce((sum, inv) => sum + (Number(inv.remaining) || 0), 0);
+function renderSettlementStats(agents, invoices, date, returns = []) {
+    const todayInvoices = invoices.filter(inv => invDate(inv) === date);
+    const totalSales = todayInvoices.reduce((sum, inv) => sum + invSales(inv), 0);
+    const cashRefunds = cashRefundsOn(returns, date);
+    const totalPaid = round2(todayInvoices.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0) - cashRefunds);
+    const totalRemaining = todayInvoices.reduce((sum, inv) => sum + invOwnRemaining(inv), 0);
 
     return `
         <div class="stats-grid" style="margin-bottom: 2rem;">
@@ -3663,8 +3968,8 @@ function renderSettlementStats(agents, invoices, date) {
     `;
 }
 
-function renderSettlementRows(agents, invoices, date) {
-    const todayInvoices = invoices.filter(inv => inv.date && inv.date.startsWith(date));
+function renderSettlementRows(agents, invoices, date, returns = []) {
+    const todayInvoices = invoices.filter(inv => invDate(inv) === date);
     
     const agentSales = {};
     agents.forEach(a => agentSales[a.id] = { name: a.name, total: 0, paid: 0 });
@@ -3672,14 +3977,16 @@ function renderSettlementRows(agents, invoices, date) {
     todayInvoices.forEach(inv => {
         const id = inv.agentId;
         if(agentSales[id]) {
-            agentSales[id].total += (Number(inv.total) || 0);
+            agentSales[id].total += invSales(inv);
             agentSales[id].paid += (Number(inv.paid) || 0);
         }
     });
+    // Cash returned to customers that day comes off the agent's cash to hand in
+    agents.forEach(a => { agentSales[a.id].paid = round2(agentSales[a.id].paid - cashRefundsOn(returns, date, a.id)); });
 
     const rowsAsArray = agents.map(a => `
         <tr>
-            <td>${a.name}</td>
+            <td>${esc(a.name)}</td>
             <td>${agentSales[a.id].total.toFixed(2)}</td>
             <td style="font-weight: 700; color: var(--success);">${agentSales[a.id].paid.toFixed(2)}</td>
         </tr>
@@ -3755,12 +4062,12 @@ async function refreshSettlementHistory(date) {
                     return `
                         <tr>
                             <td>${r.createdAt ? new Date(r.createdAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'}) : '-'}</td>
-                            <td>${agentName(r.agentId)}</td>
+                            <td>${esc(agentName(r.agentId))}</td>
                             <td>${fmt2(r.expected)}</td>
                             <td>${fmt2(r.actual)}</td>
                             <td dir="ltr" class="${diff < 0 ? 'text-danger' : diff > 0 ? 'text-success' : 'text-primary'}">${fmt2(diff)}</td>
                             <td class="${statusClass(r.status)}">${statusLabel(r.status)}</td>
-                            <td>${r.note || '-'}</td>
+                            <td>${esc(r.note || '-')}</td>
                             <td>
                                 <button class="btn-delete" onclick="deleteSettlement(${r.id}, '${date}')" title="حذف التقفيلة"><i class="fas fa-trash"></i> حذف</button>
                             </td>
@@ -3777,8 +4084,8 @@ async function printThermalInvoice(inv, id) {
 
     const itemsHtml = inv.items.map((item, idx) => `
         <tr class="item-row">
-            <td class="item-name">${item.name}</td>
-            <td class="item-unit">${item.selectedUnit || 'قطعة'}</td>
+            <td class="item-name">${esc(item.name)}</td>
+            <td class="item-unit">${esc(item.selectedUnit || 'قطعة')}</td>
             <td class="item-price">${Number(item.salePrice).toFixed(2)}</td>
             <td class="item-qty">${item.qty}</td>
             <td class="item-total">${(Number(item.salePrice) * Number(item.qty)).toFixed(2)}</td>
@@ -3813,10 +4120,10 @@ async function printThermalInvoice(inv, id) {
 
             <div class="customer-section">
                 <div class="cust-row-top">
-                    <span>إلى أ / : ${inv.customer.name || 'نقدي'}</span>
-                    <span style="font-size: 10px;">هاتف: ${inv.customer.phone || '-'}</span>
+                    <span>إلى أ / : ${esc(inv.customer.name || 'نقدي')}</span>
+                    <span style="font-size: 10px;">هاتف: ${esc(inv.customer.phone || '-')}</span>
                 </div>
-                <div class="cust-row">العنوان: ${inv.customer.address || '-'}</div>
+                <div class="cust-row">العنوان: ${esc(inv.customer.address || '-')}</div>
             </div>
 
             <table class="receipt-table">
@@ -3876,7 +4183,7 @@ async function printThermalInvoice(inv, id) {
             </div>
 
             <div class="top-line" style="margin-top: 8px; border-top-width: 2.2px;"></div>
-            <div class="agent-row" style="margin-top: 4px;">المندوب: ${agentName}</div>
+            <div class="agent-row" style="margin-top: 4px;">المندوب: ${esc(agentName)}</div>
             <div class="meta-dashed" style="border-bottom: 0; margin-top: 4px; padding: 2px 0;"></div>
             
             <div class="thanks-msg" style="margin-top: 4px;">شكراً لتعاملكم معنا</div>
@@ -3957,7 +4264,7 @@ async function printPaymentReceipt(payment) {
     executeHiddenPrint(`
         <html>
         <head>
-            <title>وصل استلام - ${payment.customerName}</title>
+            <title>وصل استلام - ${esc(payment.customerName)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
                 @page { margin: 0; }
@@ -3992,7 +4299,7 @@ async function printPaymentReceipt(payment) {
                 <div class="details">
                     <div class="row"><span>رقم الوصل:</span><span>#${payment.id}</span></div>
                     <div class="row"><span>التاريخ:</span><span>${new Date(payment.date).toLocaleDateString('ar-EG')}</span></div>
-                    <div class="row"><span>العميل:</span><span>${payment.customerName}</span></div>
+                    <div class="row"><span>العميل:</span><span>${esc(payment.customerName)}</span></div>
                 </div>
                 <div class="amount-box">
                     المبلغ: ${payment.amount.toFixed(2)} ج.م
@@ -4002,7 +4309,7 @@ async function printPaymentReceipt(payment) {
                         <span>إجمالي الحساب المتبقي:</span>
                         <span>${payment.remaining.toFixed(2)} ج.م</span>
                     </div>
-                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${payment.note}</div>` : ''}
+                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${esc(payment.note)}</div>` : ''}
                 </div>
                 <div class="footer">
                     <div style="font-weight: 800; border-bottom: 1.2px dashed #000; margin-bottom: 4px; padding-bottom: 4px;">توقيع المستلم: .....................</div>
@@ -4023,6 +4330,66 @@ async function getAgentName(id) {
 
 // --- Ledger & Account Movements ---
 
+// One place for every customer statement number (screen + print), so they always agree.
+// debit = what the customer owes more, credit = what reduces it.
+function buildCustomerStatement(customer, invoices, payments, returns, startDate, endDate) {
+    const cid = customer.id;
+    const allInv = invoices.filter(inv => inv.customer?.id == cid);
+    const allPay = payments.filter(p => p.customerId == cid);
+    const allRet = returns.filter(r => r.customerId == cid);
+    const all = [
+        // like the shop's old statement: the invoice row carries the sale, its cash paid at the counter is its own row right after it
+        ...allInv.flatMap(inv => {
+            const rows = [{ date: inv.date, sk: inv.date, type: 'فاتورة مبيعات', id: inv.id, debit: invoiceOwnDebit(inv, returns), credit: 0, ref: `فاتورة #${inv.id}`, originalType: 'invoice', cat: 'sale', sub: 0 }];
+            if ((Number(inv.paid) || 0) > 0) rows.push({ date: inv.date, sk: inv.date, type: 'دفعة نقدية (مع الفاتورة)', id: inv.id, debit: 0, credit: Number(inv.paid) || 0, ref: `سداد تبع فاتورة #${inv.id}`, originalType: 'invoicepay', cat: 'invpaid', sub: 1 });
+            return rows;
+        }),
+        ...allPay.map(p => {
+            const isOut = p.direction === 'out';
+            return { date: p.date, sk: p.createdAt || p.date, type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)', id: p.id,
+                debit: isOut ? (Number(p.amount) || 0) : 0, credit: isOut ? 0 : (Number(p.amount) || 0),
+                ref: p.note || (isOut ? 'مستردات / صادر' : 'سداد نقدي'), originalType: 'payment', direction: p.direction || 'in', cat: isOut ? 'out' : 'in' };
+        }),
+        ...allRet.map(r => ({ date: r.date, sk: r.date, type: 'مرتجع مبيعات', id: r.id, debit: Number(r.cashRefund) || 0, credit: Number(r.total) || 0,
+            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})` + ((Number(r.cashRefund) || 0) > 0 ? ` - رد كاش ${(Number(r.cashRefund)).toFixed(2)}` : ''), originalType: 'return', cat: 'ret' }))
+    ].sort((a, b) => (new Date(a.sk) - new Date(b.sk)) || (((a.originalType === 'invoicepay' ? 'invoice' : a.originalType) + a.id).localeCompare((b.originalType === 'invoicepay' ? 'invoice' : b.originalType) + b.id)) || ((a.sub || 0) - (b.sub || 0)));
+
+    const initial = Number(customer.initialBalance) || 0;
+    let run = initial;
+    all.forEach(m => { run = round2(run + m.debit - m.credit); m.running = run; });
+    const computed = run;
+    // The balance the shop really uses (POS, customers list). If movements do not explain it (data imported from the old app,
+    // or a manual change), show the gap as its own line instead of silently ending on a different number.
+    const stored = Number(customer.balance) || 0;
+    const gap = round2(stored - computed);
+    const hasGap = Math.abs(gap) >= 0.01 && !(computed < 0 && stored === 0);
+    let adj = null;
+    if (hasGap) {
+        adj = { date: null, type: 'تسوية رصيد', id: 0, debit: gap > 0 ? gap : 0, credit: gap < 0 ? -gap : 0, ref: 'فرق بين الرصيد المسجل للعميل وحركاته', originalType: 'adjust', running: stored, cat: 'adj' };
+    }
+    const startKey = startDate || null, endKey = endDate ? endDate + 'T23:59:59' : null;
+    const inRange = m => (!startKey || String(m.date) >= startKey) && (!endKey || String(m.date) <= endKey);
+    const shown = all.filter(inRange);
+    // balance carried into the period = running balance after the last movement before it
+    let opening = initial;
+    if (startKey) { const before = all.filter(m => String(m.date) < startKey); opening = before.length ? before[before.length - 1].running : initial; }
+    let openingShown = null;
+    if (startKey) openingShown = { label: 'رصيد سابق قبل الفترة', amount: opening, note: 'الرصيد المرحّل لبداية الفترة المختارة' };
+    else if (initial) openingShown = { label: 'رصيد افتتاحي (سابق)', amount: initial, note: 'رصيد مُرحل في بداية التعامل' };
+    const movements = shown.slice();
+    let finalBalance = shown.length ? shown[shown.length - 1].running : opening;
+    if (adj && !endKey) { movements.push(adj); finalBalance = stored; }
+    const sumOf = (arr, f) => round2(arr.reduce((t, m) => t + f(m), 0));
+    const totals = {
+        sales: sumOf(shown.filter(m => m.cat === 'sale'), m => m.debit),
+        paid: sumOf(shown.filter(m => m.cat === 'invpaid'), m => m.credit) + sumOf(shown.filter(m => m.cat === 'in'), m => m.credit),
+        returns: sumOf(shown.filter(m => m.cat === 'ret'), m => m.credit),
+        cashOut: sumOf(shown.filter(m => m.cat === 'out'), m => m.debit)
+    };
+    totals.paid = round2(totals.paid);
+    return { movements, openingShown, finalBalance: round2(finalBalance), totals, custInvoices: allInv, custReturns: allRet, computed, stored, gap: hasGap ? gap : 0 };
+}
+
 async function showCustomerLedger(customerId, startDate = null, endDate = null) {
     const customer = await db.getById('customers', customerId);
     if (!customer) return showToast('العميل غير موجود', 'error');
@@ -4034,78 +4401,18 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
         db.getAll('returns')
     ]);
 
-    // Filter by customer and date if provided
-    let custInvoices = invoices.filter(inv => inv.customer?.id == customerId);
-    let custPayments = payments.filter(p => p.customerId == customerId);
-    let custReturns = returns.filter(r => r.customerId == customerId);
+    const st = buildCustomerStatement(customer, invoices, payments, returns, startDate, endDate);
+    const { movements, openingShown, totals } = st;
+    const runningBalance = st.finalBalance;
+    const custInvoices = st.custInvoices, custReturns = st.custReturns;
 
-    if (startDate) {
-        custInvoices = custInvoices.filter(inv => inv.date >= startDate);
-        custPayments = custPayments.filter(p => p.date >= startDate);
-        custReturns = custReturns.filter(r => r.date >= startDate);
-    }
-    if (endDate) {
-        custInvoices = custInvoices.filter(inv => inv.date <= endDate + 'T23:59:59');
-        custPayments = custPayments.filter(p => p.date <= endDate + 'T23:59:59');
-        custReturns = custReturns.filter(r => r.date <= endDate + 'T23:59:59');
-    }
-
-    const movements = [
-        ...custInvoices.map(inv => ({
-            date: inv.date,
-            type: 'فاتورة مبيعات',
-            id: inv.id,
-            debit: Number(inv.total) || 0,
-            credit: 0,
-            ref: `فاتورة #${inv.id}`,
-            originalType: 'invoice'
-        })),
-        ...custPayments.map(p => {
-            const isOut = p.direction === 'out'; // New field logic
-            return {
-                date: p.date,
-                type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)',
-                id: p.id,
-                debit: isOut ? (Number(p.amount) || 0) : 0,
-                credit: isOut ? 0 : (Number(p.amount) || 0),
-                ref: p.note || (isOut ? 'مستردات / صادر' : 'سداد نقدي'),
-                originalType: 'payment',
-                direction: p.direction || 'in'
-            };
-        }),
-        ...custReturns.map(r => ({
-            date: r.date,
-            type: 'مرتجع مبيعات',
-            id: r.id,
-            debit: 0,
-            credit: Number(r.total) || 0,
-            ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`,
-            originalType: 'return'
-        }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
-
-    // Calculate running balance starting from BEFORE the filtered period if filters are active
-    let runningBalance = customer.initialBalance || 0;
-    
-    // If filtering, we should ideally calculate the balance up to the startDate
-    // For simplicity here, we'll calculate all movements but only DISPLAY filtered ones
-    // Or just calculate running balance over all time. Let's do all time for accuracy.
-    
-    movements.forEach(m => {
-        runningBalance += (m.debit - m.credit);
-        m.running = runningBalance;
-    });
-
-    // Final filter for display if needed (but we already filtered the components)
-    // Re-calculating running balance for the entire history to ENSURE accuracy
-    
     contentArea.innerHTML = `
         <div class="page-header">
             <div class="header-title">
                 <i class="fas fa-book-open" style="color: var(--primary); font-size: 1.5rem;"></i>
                 <div>
-                    <h2>كشف حساب العميل: ${customer.name}</h2>
-                    <p style="font-size: 0.9rem; color: var(--text-muted);">${customer.phone || 'بدون هاتف'}</p>
+                    <h2>كشف حساب العميل: ${esc(customer.name)}</h2>
+                    <p style="font-size: 0.9rem; color: var(--text-muted);">${esc(customer.phone || 'بدون هاتف')}</p>
                 </div>
             </div>
             <div class="header-actions">
@@ -4151,9 +4458,9 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                     <h2 class="stat-value">${runningBalance.toFixed(2)} ج.م</h2>
                 </div>
             </div>
-            ${renderStatCard('إجمالي المبيعات', custInvoices.reduce((sum, i) => sum + i.total, 0).toFixed(2), 'fas fa-shopping-cart', 'primary')}
-            ${renderStatCard('إجمالي المدفوعات', custPayments.filter(p=>p.direction!=='out').reduce((sum, p) => sum + p.amount, 0).toFixed(2), 'fas fa-check-double', 'success')}
-            ${renderStatCard('إجمالي المرتجعات', custReturns.reduce((sum, r) => sum + r.total, 0).toFixed(2), 'fas fa-undo', 'accent')}
+            ${renderStatCard('إجمالي المبيعات', totals.sales.toFixed(2), 'fas fa-shopping-cart', 'primary')}
+            ${renderStatCard('إجمالي المدفوعات', totals.paid.toFixed(2), 'fas fa-check-double', 'success')}
+            ${renderStatCard('إجمالي المرتجعات', totals.returns.toFixed(2), 'fas fa-undo', 'accent')}
         </div>
 
         <div class="card statement-card">
@@ -4169,28 +4476,28 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                     </tr>
                 </thead>
                 <tbody>
-                    ${customer.initialBalance ? `
+                    ${openingShown ? `
                         <tr class="initial-row">
                             <td>-</td>
-                            <td style="font-weight:700">رصيد افتتاحي (سابق)</td>
-                            <td class="text-danger">${customer.initialBalance.toFixed(2)}</td>
-                            <td>-</td>
-                            <td style="font-weight:900">${customer.initialBalance.toFixed(2)}</td>
-                            <td>رصيد مُرحل في بداية التعامل</td>
+                            <td style="font-weight:700">${esc(openingShown.label)}</td>
+                            <td class="text-danger">${openingShown.amount > 0 ? openingShown.amount.toFixed(2) : '-'}</td>
+                            <td class="text-success">${openingShown.amount < 0 ? (-openingShown.amount).toFixed(2) : '-'}</td>
+                            <td style="font-weight:900">${openingShown.amount.toFixed(2)}</td>
+                            <td>${esc(openingShown.note)}</td>
                         </tr>
                     ` : ''}
                     ${movements.map(m => `
                         <tr class="${m.originalType}-row">
-                            <td>${new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })}</td>
+                            <td>${m.date ? new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' }) : '-'}</td>
                             <td>
-                                <span class="badge-type ${m.originalType}">${m.type}</span>
+                                <span class="badge-type ${m.originalType}">${esc(m.type)}</span>
                             </td>
                             <td class="text-danger font-bold">${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td class="text-success font-bold">${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
                             <td style="font-weight:900; color: var(--primary); background: rgba(var(--primary-rgb), 0.05);">${m.running.toFixed(2)}</td>
                             <td>
                                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span>${m.ref}</span>
+                                    <span>${esc(m.ref)}</span>
                                     <div class="row-actions">
                                         ${m.originalType === 'payment' ? `
                                             <button class="btn-icon edit" title="تعديل" onclick="editPayment('customer', ${m.id})"><i class="fas fa-edit"></i></button>
@@ -4198,14 +4505,14 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                                         ` : ''}
                                         ${m.originalType === 'invoice' ? `
                                             <button class="btn-icon view" title="تعديل الفاتورة" onclick="editInvoice(${m.id})"><i class="fas fa-pen"></i></button>
-                                            <button class="btn-icon print" title="طباعة" onclick="printInvoice(${m.id})"><i class="fas fa-print"></i></button>
+                                            <button class="btn-icon print" title="طباعة" onclick="reprintInvoice(${m.id})"><i class="fas fa-print"></i></button>
                                         ` : ''}
                                     </div>
                                 </div>
                             </td>
                         </tr>
                     `).join('')}
-                    ${movements.length === 0 && !customer.initialBalance ? '<tr><td colspan="6" style="text-align:center; padding: 3rem; color: #666;">لا توجد حركات مسجلة لهذا العميل</td></tr>' : ''}
+                    ${movements.length === 0 && !openingShown ? '<tr><td colspan="6" style="text-align:center; padding: 3rem; color: #666;">لا توجد حركات مسجلة لهذا العميل</td></tr>' : ''}
                 </tbody>
             </table>
         </div>
@@ -4270,7 +4577,7 @@ function showPaymentModal(type, entityId, editingPayment = null, forceDirection 
                 </div>
                 <div>
                     <label style="color: var(--text-muted, #aaa); display:block; margin-bottom:6px; font-size:0.9rem;">ملاحظات / البيان</label>
-                    <input type="text" id="pay-note" value="${note}" placeholder="مثلاً: سداد نقدي، دفعة تحت الحساب..." style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--border-dark,#1e2d4d); background:var(--bg-dark,#050a1f); color:#fff; font-size:1rem; box-sizing:border-box;">
+                    <input type="text" id="pay-note" value="${esc(note)}" placeholder="مثلاً: سداد نقدي، دفعة تحت الحساب..." style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--border-dark,#1e2d4d); background:var(--bg-dark,#050a1f); color:#fff; font-size:1rem; box-sizing:border-box;">
                 </div>
             </div>
             <div style="display:flex; gap:1rem; margin-top:1.5rem; justify-content:flex-end;">
@@ -4284,6 +4591,26 @@ function showPaymentModal(type, entityId, editingPayment = null, forceDirection 
         </div>
     `;
     document.body.appendChild(modal);
+    if (window.matchMedia('(max-width: 768px)').matches) {
+        modal.classList.add('pay-phone');
+        const box = modal.firstElementChild;
+        const amt = document.getElementById('pay-amount');
+        const rows = box.querySelectorAll('div[style*="display: grid"] > div');
+        if (rows[1]) rows[1].classList.add('pay-extra');
+        if (rows[2]) rows[2].classList.add('pay-extra');
+        const ent = type === 'customer' ? state.cache.customers.find(c => String(c.id) === String(entityId)) : null;
+        const bal = ent ? Number(ent.balance) || 0 : 0;
+        const q = document.createElement('div');
+        q.className = 'pay-quick';
+        let html = '';
+        if (!editingPayment && bal > 0 && direction === 'in') {
+            html += `<div class="pay-bal">الدين: <b>${qsNum(bal)} ج</b></div><button type="button" class="pay-full" onclick="document.getElementById('pay-amount').value=${bal};">سداد كامل ${qsNum(bal)}</button>`;
+        }
+        html += `<button type="button" class="pay-more" onclick="this.closest('.pay-phone').classList.toggle('show-extra')">التاريخ والملاحظات</button>`;
+        q.innerHTML = html;
+        box.querySelector('div[style*="display: grid"]').before(q);
+        if (amt) { amt.setAttribute('inputmode', 'decimal'); amt.addEventListener('keydown', e => { if (e.key === 'Enter') box.querySelector('.btn-save').click(); }); setTimeout(() => amt.focus(), 80); }
+    }
 }
 
 async function deletePayment(type, id) {
@@ -4306,11 +4633,11 @@ async function deletePayment(type, id) {
         // If we delete an IN (payment received), balance increases (debt goes up)
         // If we delete an OUT (refund sent), balance decreases (debt goes down)
         if (type === 'customer') {
-            entity.balance = (entity.balance || 0) + (direction === 'in' ? amount : -amount);
+            entity.balance = round2((entity.balance || 0) + (direction === 'in' ? amount : -amount));
         } else {
             // Supplier: delete OUT (we paid them) -> balance increases (we owe more)
             // delete IN (refund received) -> balance decreases (we owe less)
-            entity.balance = (entity.balance || 0) + (direction === 'out' ? amount : -amount);
+            entity.balance = round2((entity.balance || 0) + (direction === 'out' ? amount : -amount));
         }
         await db.update(entityStore, entity);
     }
@@ -4348,7 +4675,7 @@ async function recalculateCustomerBalance(customerId) {
         let credit = 0;
 
         custInvoices.forEach(inv => {
-            debit += (Number(inv.total) || 0);
+            debit += invoiceOwnDebit(inv, returns);
             credit += (Number(inv.paid) || 0);
         });
 
@@ -4359,11 +4686,14 @@ async function recalculateCustomerBalance(customerId) {
 
         custReturns.forEach(r => {
             credit += (Number(r.total) || 0);
+            debit += (Number(r.cashRefund) || 0);
         });
 
-        const newBalance = Math.max(0, debit - credit);
+        const newBalance = Math.max(0, round2(debit - credit));
+        if (Math.abs(newBalance - (Number(customer.balance) || 0)) >= 0.01 &&
+            !confirm(`الرصيد المسجل للعميل: ${(Number(customer.balance) || 0).toFixed(2)}\nالرصيد المحسوب من الحركات: ${newBalance.toFixed(2)}\nهل تريد استبدال الرصيد المسجل بالمحسوب؟`)) return;
         customer.balance = newBalance;
-        await db.update('customers', customer);
+        await db.update('customers', customer, { absolute: true });
         
         showToast('تم إعادة حساب الرصيد بنجاح');
         showCustomerLedger(customerId);
@@ -4392,6 +4722,7 @@ async function recalculateSupplierBalance(supplierId) {
         supPurchases.forEach(p => {
             const total = p.totalCost !== undefined ? p.totalCost : (p.total || 0);
             credit += Number(total);
+            debit += Number(p.paid) || 0; // paid at purchase time
         });
 
         supPayments.forEach(p => {
@@ -4399,9 +4730,9 @@ async function recalculateSupplierBalance(supplierId) {
             else debit += Number(p.amount);
         });
 
-        const newBalance = Math.max(0, credit - debit);
+        const newBalance = Math.max(0, round2(credit - debit));
         supplier.balance = newBalance;
-        await db.update('suppliers', supplier);
+        await db.update('suppliers', supplier, { absolute: true });
         
         showToast('تم إعادة حساب الرصيد بنجاح');
         showSupplierLedger(supplierId);
@@ -4439,10 +4770,10 @@ async function handleUpdatePayment(event, type, paymentId) {
         const diff = newAmount - oldAmount;
         if (type === 'customer') {
             // Customer: In increases credit (decreases debt), Out increases debt
-            entity.balance = (entity.balance || 0) - (direction === 'in' ? diff : -diff);
+            entity.balance = round2((entity.balance || 0) - (direction === 'in' ? diff : -diff));
         } else {
             // Supplier: Out decreases debt, In decreases bank (increases debt)
-            entity.balance = (entity.balance || 0) - (direction === 'out' ? diff : -diff);
+            entity.balance = round2((entity.balance || 0) - (direction === 'out' ? diff : -diff));
         }
         await db.update(entityStore, entity);
     }
@@ -4477,7 +4808,7 @@ async function handleSavePaymentGlobal() {
         });
         const customer = await db.getById('customers', entityId);
         if (customer) {
-            customer.balance = (customer.balance || 0) - (direction === 'in' ? amount : -amount);
+            customer.balance = round2((customer.balance || 0) - (direction === 'in' ? amount : -amount));
             await db.update('customers', customer);
         }
         const modal = document.getElementById('payment-modal-global');
@@ -4493,7 +4824,7 @@ async function handleSavePaymentGlobal() {
         });
         const supplier = await db.getById('suppliers', entityId);
         if (supplier) {
-            supplier.balance = (supplier.balance || 0) - (direction === 'out' ? amount : -amount);
+            supplier.balance = round2((supplier.balance || 0) - (direction === 'out' ? amount : -amount));
             await db.update('suppliers', supplier);
         }
         const modal = document.getElementById('payment-modal-global');
@@ -4532,7 +4863,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             date: p.date,
             type: 'فاتورة شراء',
             id: p.id,
-            debit: 0,
+            debit: Number(p.paid) || 0,
             credit: Number(p.totalCost !== undefined ? p.totalCost : (p.total || 0)),
             ref: `فاتورة #${p.id}`,
             originalType: 'purchase'
@@ -4541,6 +4872,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             const isIn = p.direction === 'in';
             return {
                 date: p.date,
+                sk: p.createdAt,
                 type: isIn ? 'نقد وارد (من المورد)' : 'نقد صادر (للمورد)',
                 id: p.id,
                 debit: isIn ? 0 : Number(p.amount),
@@ -4550,7 +4882,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
                 direction: p.direction || 'out'
             };
         })
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     // Calculate running balance
     let runningBalance = supplier.initialBalance || 0;
@@ -4564,8 +4896,8 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             <div class="header-title">
                 <i class="fas fa-truck-ramp-box" style="color: var(--secondary); font-size: 1.5rem;"></i>
                 <div>
-                    <h2>كشف حساب المورد: ${supplier.name}</h2>
-                    <p style="font-size: 0.9rem; color: var(--text-muted);">${supplier.phone || 'بدون هاتف'}</p>
+                    <h2>كشف حساب المورد: ${esc(supplier.name)}</h2>
+                    <p style="font-size: 0.9rem; color: var(--text-muted);">${esc(supplier.phone || 'بدون هاتف')}</p>
                 </div>
             </div>
             <div class="header-actions">
@@ -4642,13 +4974,13 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
                     ${movements.map(m => `
                         <tr>
                             <td>${new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })}</td>
-                            <td><span class="badge-type ${m.originalType}">${m.type}</span></td>
+                            <td><span class="badge-type ${m.originalType}">${esc(m.type)}</span></td>
                             <td class="text-danger font-bold">${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td class="text-success font-bold">${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
                             <td style="font-weight:900; color: var(--primary); background: rgba(var(--primary-rgb), 0.05);">${m.running.toFixed(2)}</td>
                             <td>
                                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span>${m.ref}</span>
+                                    <span>${esc(m.ref)}</span>
                                     <div class="row-actions">
                                         ${m.type.includes('نقد') ? `
                                             <button class="btn-icon edit" title="تعديل" onclick="editPayment('supplier', ${m.id})"><i class="fas fa-edit"></i></button>
@@ -4670,7 +5002,7 @@ async function printSupplierPaymentReceipt(payment) {
     executeHiddenPrint(`
         <html>
         <head>
-            <title>وصل دفع للمورد - ${payment.supplierName}</title>
+            <title>وصل دفع للمورد - ${esc(payment.supplierName)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
                 @page { margin: 0; }
@@ -4705,7 +5037,7 @@ async function printSupplierPaymentReceipt(payment) {
                 <div class="details">
                     <div class="row"><span>رقم الوصل:</span><span>#${payment.id}</span></div>
                     <div class="row"><span>التاريخ:</span><span>${new Date(payment.date).toLocaleDateString('ar-EG')}</span></div>
-                    <div class="row"><span>المورد:</span><span>${payment.supplierName}</span></div>
+                    <div class="row"><span>المورد:</span><span>${esc(payment.supplierName)}</span></div>
                 </div>
                 <div class="amount-box">المبلغ المدفوع: ${payment.amount.toFixed(2)} ج.م</div>
                 <div class="details">
@@ -4713,7 +5045,7 @@ async function printSupplierPaymentReceipt(payment) {
                         <span>المتبقي للمورد:</span>
                         <span>${(payment.remaining || 0).toFixed(2)} ج.م</span>
                     </div>
-                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${payment.note}</div>` : ''}
+                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${esc(payment.note)}</div>` : ''}
                 </div>
                 <div class="footer">
                     <div style="font-weight: 800; border-bottom: 1.2px dashed #000; margin-bottom: 4px; padding-bottom: 4px;">توقيع المستلم: .....................</div>
@@ -4729,18 +5061,14 @@ async function printCustomerStatement(customerId) {
     const customer = await db.getById('customers', customerId);
     const invoices = await db.getAll('invoices');
     const payments = await db.getAll('customerPayments');
-    const custInvoices = invoices.filter(inv => inv.customer?.id == customerId);
-    const custPayments = payments.filter(p => p.customerId == customerId);
-
-    const movements = [
-        ...custInvoices.map(inv => ({ date: inv.date, desc: `فاتورة #${inv.id}`, debit: inv.total, credit: 0 })),
-        ...custPayments.map(p => ({ date: p.date, desc: p.note || 'دفعة سداد', debit: 0, credit: p.amount }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    const allReturns = await db.getAll('returns');
+    const st = buildCustomerStatement(customer, invoices, payments, allReturns);
+    const movements = st.movements.map(m => ({ date: m.date, desc: m.originalType === 'payment' || m.originalType === 'adjust' ? (m.originalType === 'adjust' ? m.type + ': ' + m.ref : m.ref) : m.ref, debit: m.debit, credit: m.credit, running: m.running }));
 
     executeHiddenPrint(`
         <html>
         <head>
-            <title>كشف حساب - ${customer.name}</title>
+            <title>كشف حساب - ${esc(customer.name)}</title>
             <style>
                 body { direction: rtl; font-family: 'Cairo', sans-serif; padding: 20px; }
                 table { width: 100%; border-collapse: collapse; margin-top: 20px; }
@@ -4754,7 +5082,7 @@ async function printCustomerStatement(customerId) {
             <div class="header">
                 <h1>أبوزامل للتجارة والتوزيع</h1>
                 <h2>كشف حساب عميل</h2>
-                <p>العميل: ${customer.name} | الهاتف: ${customer.phone}</p>
+                <p>العميل: ${esc(customer.name)} | الهاتف: ${esc(customer.phone)}</p>
             </div>
             <table>
                 <thead>
@@ -4763,29 +5091,33 @@ async function printCustomerStatement(customerId) {
                         <th>البيان</th>
                         <th>مدين (عليه)</th>
                         <th>دائن (له)</th>
+                        <th>الرصيد</th>
                     </tr>
                 </thead>
                 <tbody>
-                    ${customer.initialBalance ? `
+                    ${st.openingShown ? `
                         <tr style="background:#f9f9f9; font-weight:bold;">
                             <td>-</td>
-                            <td>رصيد افتتاحي (سابق)</td>
-                            <td>${customer.initialBalance.toFixed(2)}</td>
-                            <td>-</td>
+                            <td>${esc(st.openingShown.label)}</td>
+                            <td>${st.openingShown.amount > 0 ? st.openingShown.amount.toFixed(2) : '-'}</td>
+                            <td>${st.openingShown.amount < 0 ? (-st.openingShown.amount).toFixed(2) : '-'}</td>
+                            <td>${st.openingShown.amount.toFixed(2)}</td>
                         </tr>
                     ` : ''}
                     ${movements.map(m => `
                         <tr>
-                            <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
-                            <td>${m.desc}</td>
+                            <td>${m.date ? new Date(m.date).toLocaleDateString('ar-EG') : '-'}</td>
+                            <td>${esc(m.desc)}</td>
                             <td>${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td>${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
+                            <td>${m.running.toFixed(2)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
             <div class="summary">
-                <p>الرصيد المتبقي: ${(customer.balance || 0).toFixed(2)} ج.م</p>
+                <p>إجمالي المبيعات: ${st.totals.sales.toFixed(2)} | إجمالي المدفوعات: ${st.totals.paid.toFixed(2)} | إجمالي المرتجعات: ${st.totals.returns.toFixed(2)}</p>
+                <p>الرصيد المتبقي: ${st.finalBalance.toFixed(2)} ج.م</p>
             </div>
         </body>
         </html>
@@ -4800,9 +5132,9 @@ async function printSupplierStatement(supplierId) {
     const supPayments = payments.filter(p => p.supplierId == supplierId);
 
     const movements = [
-        ...supPurchases.map(p => ({ date: p.date, desc: `فاتورة شراء #${p.id}`, debit: 0, credit: p.totalCost !== undefined ? p.totalCost : (p.total || 0) })),
+        ...supPurchases.map(p => ({ date: p.date, desc: `فاتورة شراء #${p.id}`, debit: Number(p.paid) || 0, credit: p.totalCost !== undefined ? p.totalCost : (p.total || 0) })),
         ...supPayments.map(p => ({ date: p.date, desc: p.note || 'دفعة سداد', debit: p.amount, credit: 0 }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     // Reliable iframe printing
     const iframe = document.createElement('iframe');
@@ -4812,7 +5144,7 @@ async function printSupplierStatement(supplierId) {
     iframe.contentDocument.write(`
         <html>
         <head>
-            <title>كشف حساب مورد - ${supplier.name}</title>
+            <title>كشف حساب مورد - ${esc(supplier.name)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
                 body { direction: rtl; font-family: 'Cairo', sans-serif; padding: 20px; color: #000; }
@@ -4832,7 +5164,7 @@ async function printSupplierStatement(supplierId) {
             <div class="header">
                 <h1>أبوزامل للتجارة والتوزيع</h1>
                 <h2>كشف حساب المورد</h2>
-                <p><strong>المورد:</strong> ${supplier.name} | <strong>الهاتف:</strong> ${supplier.phone || '-'}</p>
+                <p><strong>المورد:</strong> ${esc(supplier.name)} | <strong>الهاتف:</strong> ${esc(supplier.phone || '-')}</p>
             </div>
             <table>
                 <thead>
@@ -4855,7 +5187,7 @@ async function printSupplierStatement(supplierId) {
                     ${movements.map(m => `
                         <tr>
                             <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
-                            <td>${m.desc}</td>
+                            <td>${esc(m.desc)}</td>
                             <td>${m.debit > 0 ? Number(m.debit).toFixed(2) : '-'}</td>
                             <td>${m.credit > 0 ? Number(m.credit).toFixed(2) : '-'}</td>
                         </tr>
@@ -4935,7 +5267,7 @@ async function renderBestAgent(invoices, agents) {
     return `
         <div class="best-agent-card">
             <i class="fas fa-crown"></i>
-            <h4>${agent ? agent.name : 'غير معروف'}</h4>
+            <h4>${esc(agent ? agent.name : 'غير معروف')}</h4>
             <p>إجمالي المبيعات: ${max.toFixed(2)} ج.م</p>
         </div>
     `;
@@ -5009,3 +5341,623 @@ function loadAgentIntoSettlement(agentId) {
 
 // Start Application
 window.onload = init;
+
+
+// ================= Online mode (multi-user) =================
+function azCanOpen(page) {
+    if (!state.user || state.user.role !== 'seller') return page !== 'my-invoices';
+    return ['pos', 'products', 'customers', 'my-invoices', 'customer-ledger'].includes(page);
+}
+
+function azApplyUser() {
+    const me = db.me;
+    if (!me) return;
+    state.user = { name: me.name, role: me.role === 'owner' ? 'admin' : 'seller', username: me.username, agentId: me.agent_id };
+    const isSeller = state.user.role === 'seller';
+    document.body.classList.toggle('role-seller', isSeller);
+    document.querySelectorAll('.nav-item').forEach(li => {
+        const page = li.getAttribute('data-page');
+        li.style.display = azCanOpen(page) ? '' : 'none';
+    });
+    const prof = document.querySelector('.user-profile span');
+    if (prof) prof.textContent = (isSeller ? 'بياع: ' : 'المدير: ') + me.name;
+    const logout = document.getElementById('logout-btn');
+    if (logout) logout.style.display = 'inline-flex';
+}
+
+function azSetupOnlineBanner() {
+    let bar = document.getElementById('offline-banner');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'offline-banner';
+        bar.addEventListener('click', () => {
+            const f = db.failed || [];
+            if (f.length) {
+                const lines = f.map(o => '• ' + (o.store || '') + ' ' + (o.data && o.data.id ? '#' + o.data.id : '') + ': ' + o.failed);
+                alert('عمليات ما اتحفظتش على السيرفر:\n' + lines.join('\n'));
+            }
+        });
+        document.body.appendChild(bar);
+    }
+    let st = { offline: false, pending: 0, failed: 0, syncing: false };
+    const update = () => {
+        const off = !navigator.onLine || st.offline;
+        let txt = '', cls = '';
+        if (st.failed) { txt = 'فيه ' + st.failed + ' عملية ما اتحفظتش على السيرفر. اضغط هنا للتفاصيل'; cls = 'fail'; }
+        else if (off) { txt = 'أوفلاين: شغال على الجهاز' + (st.pending ? '، ' + st.pending + ' عملية مستنية النت' : '') + '. هتتحفظ لوحدها لما النت يرجع'; cls = 'off'; }
+        else if (st.syncing || st.pending) { txt = 'جاري حفظ ' + st.pending + ' عملية على السيرفر...'; cls = 'sync'; }
+        bar.className = cls;
+        bar.textContent = txt;
+        bar.style.display = txt ? 'block' : 'none';
+    };
+    window.addEventListener('az-sync', (e) => { st = Object.assign(st, e.detail); update(); });
+    window.addEventListener('az-synced', async (e) => {
+        try { if (typeof refreshGlobalCache === 'function') await refreshGlobalCache(); } catch (x) {}
+        showToast('اتحفظ ' + e.detail.done + ' عملية على السيرفر', 'success', 4000);
+    });
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    update();
+}
+
+function azLogout() {
+    if (db.signOut) db.signOut();
+    location.reload();
+}
+window.azOnAuthLost = () => { location.reload(); };
+
+window.azShowLogin = function (database) {
+    return new Promise(async (resolve) => {
+        let needsSetup = false;
+        try { needsSetup = !!(await database.rpc('az_needs_setup', {}, { retry: false })); } catch (e) { /* offline: show the login form */ }
+        const wrap = document.createElement('div');
+        wrap.id = 'login-overlay';
+        wrap.innerHTML = `
+            <form class="login-card" id="login-form" autocomplete="on">
+                <h2>أبوزامل للتجارة والتوزيع</h2>
+                <p class="login-sub">${needsSetup ? 'أول تشغيل: أنشئ حساب المدير' : 'تسجيل الدخول'}</p>
+                ${needsSetup ? '<input id="lg-name" type="text" placeholder="الاسم" autocomplete="name">' : ''}
+                <input id="lg-user" type="text" placeholder="اسم المستخدم" autocomplete="username" autocapitalize="none" required>
+                <input id="lg-pass" type="password" placeholder="كلمة السر" autocomplete="${needsSetup ? 'new-password' : 'current-password'}" required>
+                ${needsSetup ? '<input id="lg-pass2" type="password" placeholder="أعد كتابة كلمة السر" autocomplete="new-password" required>' : ''}
+                <div id="lg-err" class="login-err"></div>
+                <button type="submit" class="btn btn-save" id="lg-btn">${needsSetup ? 'إنشاء الحساب ودخول' : 'دخول'}</button>
+            </form>`;
+        document.body.appendChild(wrap);
+        const form = wrap.querySelector('#login-form');
+        const err = wrap.querySelector('#lg-err');
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            err.textContent = '';
+            const u = wrap.querySelector('#lg-user').value.trim();
+            const p = wrap.querySelector('#lg-pass').value;
+            const btn = wrap.querySelector('#lg-btn');
+            btn.disabled = true;
+            try {
+                if (needsSetup) {
+                    const p2 = wrap.querySelector('#lg-pass2').value;
+                    if (p !== p2) throw new Error('كلمتا السر غير متطابقتين');
+                    if (p.length < 6) throw new Error('كلمة السر لازم تكون 6 حروف على الأقل');
+                    await database.rpc('az_setup_owner', { p_username: u, p_password: p, p_name: (wrap.querySelector('#lg-name').value || u) }, { retry: false });
+                }
+                await database.signIn(u, p);
+                wrap.remove();
+                resolve(database.me);
+            } catch (ex) {
+                const m = ex && ex.code === 'bad_username' ? 'اسم المستخدم: حروف إنجليزي وأرقام فقط (3 حروف على الأقل)' : (ex.message || 'حصل خطأ');
+                err.textContent = m;
+                btn.disabled = false;
+            }
+        });
+        wrap.querySelector('#lg-user').focus();
+    });
+};
+
+function renderPriceChangesCard(invoices) {
+    const rows = [];
+    (invoices || []).forEach(inv => {
+        (inv.items || []).forEach(it => {
+            if (it.originalPrice == null) return;
+            const diff = round2((Number(it.salePrice) || 0) - (Number(it.originalPrice) || 0));
+            if (Math.abs(diff) < 0.005 && !it.belowCost) return;
+            rows.push({ inv, it, diff });
+        });
+    });
+    rows.sort((a, b) => String(b.inv.date).localeCompare(String(a.inv.date)));
+    const body = rows.length === 0
+        ? '<tr><td colspan="8" style="text-align:center">لا توجد تعديلات أسعار هذا الشهر</td></tr>'
+        : rows.slice(0, 100).map(({ inv, it, diff }) => `
+            <tr>
+                <td>#${inv.id}</td>
+                <td>${inv.date ? new Date(inv.date).toLocaleDateString('ar-EG') : '-'}</td>
+                <td>${esc(inv.createdByName || '-')}</td>
+                <td>${esc(inv.customer?.name || 'نقدي')}</td>
+                <td>${esc(it.name)}</td>
+                <td>${(Number(it.originalPrice) || 0).toFixed(2)}</td>
+                <td>${(Number(it.salePrice) || 0).toFixed(2)}</td>
+                <td style="color:${diff < 0 ? 'var(--danger)' : 'var(--success, #2ecc71)'}">${diff > 0 ? '+' : ''}${diff.toFixed(2)}${it.belowCost ? ' <b title="أقل من التكلفة">⚠ أقل من التكلفة</b>' : ''}</td>
+            </tr>`).join('');
+    return `
+        <div class="card reports-table-card" style="margin-top: 2rem">
+            <h3 style="margin-bottom: 1rem">تعديلات الأسعار على الفواتير (هذا الشهر)</h3>
+            <table class="modern-table">
+                <thead><tr><th>الفاتورة</th><th>التاريخ</th><th>البياع</th><th>العميل</th><th>الصنف</th><th>السعر الأصلي</th><th>سعر البيع</th><th>الفرق</th></tr></thead>
+                <tbody>${body}</tbody>
+            </table>
+        </div>`;
+}
+
+async function renderMyInvoices() {
+    const since = new Date(Date.now() - 7 * 86400000).toLocaleDateString('en-CA');
+    const to = new Date().toLocaleDateString('en-CA');
+    const all = (await db.getByDateRange('invoices', since, to)) || [];
+    const mine = all.filter(inv => !state.user.username || inv.createdBy === state.user.username).reverse();
+    contentArea.innerHTML = `
+        <div class="page-header"><h2>فواتيري (آخر 7 أيام)</h2></div>
+        <div class="card reports-table-card">
+            <table class="modern-table">
+                <thead><tr><th>رقم</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>المدفوع</th><th>المتبقي</th><th>إجراء</th></tr></thead>
+                <tbody>${renderInvoiceReportRows(mine)}</tbody>
+            </table>
+        </div>`;
+}
+
+function azLoadUsers() { return db.rpc('az_list_users', {}); }
+
+async function renderUsersCard() {
+    const box = document.getElementById('users-card-body');
+    if (!box) return;
+    try {
+        const users = await azLoadUsers();
+        box.innerHTML = `
+            <table class="modern-table">
+                <thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>الحالة</th><th>إجراء</th></tr></thead>
+                <tbody>${users.map(u => `
+                    <tr>
+                        <td>${esc(u.name)}</td><td dir="ltr">${esc(u.username)}</td>
+                        <td>${u.role === 'owner' ? 'مدير' : 'بياع'}</td>
+                        <td>${u.active ? 'شغال' : 'موقوف'}</td>
+                        <td>
+                            <button class="btn-edit" onclick="azChangePassword('${esc(u.username)}')">تغيير كلمة السر</button>
+                            ${u.role !== 'owner' ? `<button class="btn-delete" onclick="azToggleUser('${esc(u.username)}', ${u.active ? 'false' : 'true'})">${u.active ? 'إيقاف' : 'تشغيل'}</button>` : ''}
+                        </td>
+                    </tr>`).join('')}</tbody>
+            </table>
+            <h4 style="margin:1rem 0 .5rem">إضافة بياع</h4>
+            <div class="form-grid">
+                <div class="input-group"><label>الاسم</label><input id="nu-name" type="text"></div>
+                <div class="input-group"><label>اسم المستخدم (إنجليزي)</label><input id="nu-user" type="text" dir="ltr" autocapitalize="none"></div>
+                <div class="input-group"><label>كلمة السر (6 حروف على الأقل)</label><input id="nu-pass" type="text" dir="ltr" autocomplete="off"></div>
+                <button class="btn btn-save" style="margin-top:20px" onclick="azAddSeller()">إضافة البياع</button>
+            </div>`;
+    } catch (e) {
+        box.innerHTML = '<p>تعذر تحميل المستخدمين: ' + esc(e.message) + '</p>';
+    }
+}
+
+async function azAddSeller() {
+    const name = document.getElementById('nu-name').value.trim();
+    const user = document.getElementById('nu-user').value.trim();
+    const pass = document.getElementById('nu-pass').value;
+    if (!name || !user || pass.length < 6) return showToast('اكتب الاسم واسم المستخدم وكلمة سر 6 حروف على الأقل', 'error');
+    try {
+        // each seller is also a representative (مندوب) so his invoices show in the settlement screen
+        const agentId = await db.add('agents', { name, phone: '', notes: 'حساب بياع: ' + user });
+        await db.rpc('az_create_user', { p_username: user, p_password: pass, p_name: name, p_agent: agentId }, { retry: false });
+        await refreshGlobalCache('agents');
+        showToast('تمت إضافة البياع');
+        renderUsersCard();
+    } catch (e) {
+        const msg = e.code === 'username_taken' ? 'اسم المستخدم مستخدم قبل كده' : e.code === 'bad_username' ? 'اسم المستخدم: حروف إنجليزي وأرقام فقط' : e.message;
+        showToast(msg, 'error');
+    }
+}
+
+async function azChangePassword(username) {
+    const pass = prompt('كلمة السر الجديدة لـ ' + username + ' (6 حروف على الأقل):');
+    if (!pass) return;
+    try { await db.rpc('az_set_password', { p_username: username, p_password: pass }, { retry: false }); showToast('تم تغيير كلمة السر'); }
+    catch (e) { showToast(e.code === 'weak_password' ? 'كلمة السر قصيرة' : e.message, 'error'); }
+}
+
+async function azToggleUser(username, active) {
+    try { await db.rpc('az_set_active', { p_username: username, p_active: active }, { retry: false }); renderUsersCard(); }
+    catch (e) { showToast(e.message, 'error'); }
+}
+
+// Mobile: compact rows. Tables turn into 1-2 line rows (title + key values + icon actions);
+// tap a row for the rest. Long tables get a search box and "show more" paging.
+(function azMobileTables() {
+    const PAGE = 30;
+    const isAct = h => h === '' || /^(إجراء|العمليات|ملاحظات \/ إجراءات)/.test(h);
+    function classify(heads) {
+        const n = heads.length;
+        const cols = heads.map(() => 'more');
+        let title = heads.findIndex(h => /^(الاسم|اسم|المنتج|العميل|المورد|المندوب|البيان|البند|الصنف)/.test(h));
+        if (title < 0) title = heads.findIndex(h => !isAct(h) && !/باركود|^رقم|^#|التاريخ/.test(h));
+        if (title < 0) title = 0;
+        heads.forEach((h, i) => { if (isAct(h)) cols[i] = 'act'; });
+        cols[title] = 'title';
+        let keys = 0;
+        heads.forEach((h, i) => {
+            if (cols[i] !== 'more') return;
+            if (keys < 2 && /سعر البيع|^السعر|المخزون|الرصيد|المتبقي|الإجمالي|إجمالي|المبلغ|القيمة|الصافي|العمولة|الكمية|الديون|المديونية/.test(h)) { cols[i] = 'key'; keys++; }
+        });
+        heads.forEach((h, i) => { if (cols[i] === 'more' && /التاريخ|^رقم|الباركود/.test(h)) cols[i] = 'sub'; });
+        return cols;
+    }
+    function setup(t) {
+        if (t.classList.contains('no-stack')) return;
+        const heads = [...t.querySelectorAll('thead th')].map(h => h.textContent.trim());
+        if (!heads.length) return;
+        t.classList.add('az-stack');
+        const rows = [...t.querySelectorAll('tbody tr')];
+        const compact = heads.length >= 5 && !t.querySelector('tbody input, tbody select, tbody textarea');
+        const cols = compact ? classify(heads) : null;
+        t.classList.toggle('az-compact', !!compact);
+        rows.forEach(tr => {
+            const tds = [...tr.children];
+            const full = tds.every(td => td.tagName === 'TD' && !td.hasAttribute('colspan'));
+            tds.forEach((td, i) => {
+                if (td.tagName !== 'TD' || td.hasAttribute('colspan')) return;
+                const l = heads[i] || '';
+                if (td.getAttribute('data-label') !== l) td.setAttribute('data-label', l);
+                if (cols && full) {
+                    const c = 'az-' + (cols[i] || 'more');
+                    if (!td.classList.contains(c)) { td.classList.remove('az-title', 'az-key', 'az-sub', 'az-act', 'az-more'); td.classList.add(c); }
+                }
+            });
+            if (cols && full && !tr.classList.contains('az-row')) tr.classList.add('az-row');
+        });
+        if (t.id !== 'products-table') paging(t, rows);
+    }
+    function paging(t, rows) {
+        const st = t._az || (t._az = { q: '', limit: PAGE });
+        if (t.closest('.card') && t.closest('.card').querySelector('.load-more-container, .search-input')) { remove(t); return; }
+        const real = rows.filter(tr => !tr.querySelector('td[colspan]'));
+        if (real.length <= PAGE && !st.q) { rows.forEach(tr => tr.classList.remove('az-hide')); remove(t); return; }
+        ensureControls(t);
+        const q = st.q.trim().toLowerCase();
+        let shown = 0, matches = 0;
+        real.forEach(tr => {
+            if (tr._t === undefined) tr._t = tr.textContent.toLowerCase();
+            const ok = !q || tr._t.includes(q);
+            if (ok) matches++;
+            const vis = ok && shown < st.limit;
+            if (vis) shown++;
+            tr.classList.toggle('az-hide', !vis);
+        });
+        const more = t._azMore;
+        if (more) { more.style.display = matches > shown ? '' : 'none'; more.textContent = 'عرض المزيد (' + (matches - shown) + ')'; }
+        if (t._azCount) t._azCount.textContent = matches + ' من ' + real.length;
+    }
+    function remove(t) { if (t._azBox) { t._azBox.remove(); t._azBox = null; } if (t._azMore) { t._azMore.remove(); t._azMore = null; } }
+    function ensureControls(t) {
+        if (t._azBox && t._azBox.isConnected) return;
+        const host = t.closest('.table-responsive') || t;
+        const box = document.createElement('div');
+        box.className = 'az-tools';
+        box.innerHTML = '<input type="search" class="az-tfilter" placeholder="ابحث في القائمة..."><span class="az-count"></span>';
+        host.parentNode.insertBefore(box, host);
+        const inp = box.querySelector('input');
+        inp.addEventListener('input', () => { t._az.q = inp.value; t._az.limit = PAGE; paging(t, [...t.querySelectorAll('tbody tr')]); });
+        t._azBox = box; t._azCount = box.querySelector('.az-count');
+        const btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'btn btn-new az-more-btn';
+        btn.addEventListener('click', () => { t._az.limit += PAGE; paging(t, [...t.querySelectorAll('tbody tr')]); });
+        host.parentNode.insertBefore(btn, host.nextSibling);
+        t._azMore = btn;
+    }
+    function label(root) {
+        (root || document).querySelectorAll('table').forEach(t => {
+            setup(t);
+        });
+    }
+    document.addEventListener('click', (e) => {
+        const tr = e.target.closest && e.target.closest('tr.az-row');
+        if (!tr || e.target.closest('button, a, input, select, textarea, label')) return;
+        if (tr.querySelector('.az-more')) tr.classList.toggle('open');
+    });
+    let timer = null;
+    const obs = new MutationObserver((muts) => {
+        if (muts.every(m => (m.target.closest && m.target.closest('.az-tools')) )) return;
+        clearTimeout(timer); timer = setTimeout(() => label(), 60);
+    });
+    const start = () => { label(); obs.observe(document.body, { childList: true, subtree: true }); };
+    if (document.body) start(); else document.addEventListener('DOMContentLoaded', start);
+})();
+
+// Mobile bottom navigation (sell / customers / invoices / more)
+(function azBottomNav() {
+    function build() {
+        if (document.getElementById('bottom-nav')) return;
+        const nav = document.createElement('nav');
+        nav.id = 'bottom-nav'; nav.className = 'bottom-nav';
+        nav.innerHTML = [
+            ['pos', 'fa-cash-register', 'بيع', 'bn-all'],
+            ['products', 'fa-boxes-stacked', 'المنتجات', 'bn-owner'],
+            ['customers', 'fa-users', 'العملاء', 'bn-all'],
+            ['my-invoices', 'fa-receipt', 'فواتيري', 'bn-seller'],
+            ['reports', 'fa-file-contract', 'التقارير', 'bn-owner'],
+            ['__more', 'fa-bars', 'المزيد', 'bn-all']
+        ].map(([go, ic, t, cls]) => `<button type="button" class="${cls}" data-go="${go}"><i class="fas ${ic}"></i><span>${t}</span></button>`).join('');
+        document.body.appendChild(nav);
+        nav.addEventListener('click', (e) => {
+            const b = e.target.closest('button'); if (!b) return;
+            e.stopPropagation();
+            const go = b.getAttribute('data-go');
+            if (go === '__more') { document.body.classList.toggle('sidebar-open'); return; }
+            document.body.classList.remove('sidebar-open');
+            const item = document.querySelector('.nav-item[data-page="' + go + '"]');
+            if (item) item.click();
+        });
+        const sync = () => {
+            const a = document.querySelector('.nav-item.active');
+            const page = a ? a.getAttribute('data-page') : '';
+            nav.querySelectorAll('button').forEach(b => b.classList.toggle('active', b.getAttribute('data-go') === page));
+        };
+        const side = document.querySelector('.sidebar-nav');
+        if (side) new MutationObserver(sync).observe(side, { attributes: true, subtree: true, attributeFilter: ['class'] });
+        sync();
+    }
+    if (document.body) build(); else document.addEventListener('DOMContentLoaded', build);
+})();
+
+
+// ================= Phone quick-sale screen (tiles, one screen, two big pay buttons) =================
+function qsFreq() { try { return JSON.parse(localStorage.getItem('az_freq') || '{}'); } catch (e) { return {}; } }
+function qsRecentCustomers() { try { return JSON.parse(localStorage.getItem('az_recent_customers') || '[]'); } catch (e) { return []; } }
+function qsNum(n) { n = Number(n) || 0; return Math.abs(n - Math.round(n)) < 0.005 ? String(Math.round(n)) : n.toFixed(2); }
+
+function azQuickPOS() {
+    const wrap = document.getElementById('pos-wrapper');
+    if (!wrap) return;
+    wrap.classList.add('qs-on');
+    const box = document.createElement('div');
+    box.id = 'qs'; box.className = 'qs';
+    box.innerHTML = `
+        <div class="qs-cust-row" id="qs-cust-row"></div>
+        <div id="qs-cart" class="qs-cart"></div>
+        <div class="qs-find"><input id="qs-search" type="search" inputmode="search" autocomplete="off" placeholder="دوّر على منتج أو اسكان باركود..."></div>
+        <div id="qs-grid" class="qs-grid"></div>
+        <div class="qs-bar">
+            <div class="qs-total"><small>الإجمالي</small><b id="qs-total">0</b></div>
+            <button type="button" class="qs-btn qs-cash" onclick="qsPay('cash')"><i class="fas fa-money-bill-wave"></i> كاش</button>
+            <button type="button" class="qs-btn qs-credit" onclick="qsPay('credit')"><i class="fas fa-clock"></i> آجل</button>
+        </div>
+        <div id="qs-sheet" class="qs-sheet" style="display:none"></div>`;
+    wrap.prepend(box);
+    const inp = box.querySelector('#qs-search');
+    inp.addEventListener('input', () => qsGrid());
+    inp.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const q = inp.value.trim();
+        const p = state.cache.products.find(x => x.barcode && String(x.barcode) === q);
+        if (p) { addToCart(p); inp.value = ''; qsGrid(); }
+    });
+    qsCustomers(); qsGrid(); qsRender();
+}
+
+function qsCustomers() {
+    const row = document.getElementById('qs-cust-row');
+    if (!row) return;
+    const byId = new Map(state.cache.customers.map(c => [String(c.id), c]));
+    const recents = qsRecentCustomers().map(id => byId.get(String(id))).filter(Boolean).slice(0, 3);
+    const sel = selectedCustomer ? String(selectedCustomer.id) : null;
+    const typed = !selectedCustomer && (document.getElementById('pos-customer-name') || {}).value;
+    let html = `<button type="button" class="qs-chip ${!sel && !typed ? 'on' : ''}" onclick="qsPickCash()"><i class="fas fa-money-bill"></i> نقدي</button>`;
+    const list = recents.slice();
+    if (selectedCustomer && !list.find(c => String(c.id) === sel)) list.unshift(selectedCustomer);
+    list.slice(0, 3).forEach(c => {
+        html += `<button type="button" class="qs-chip ${String(c.id) === sel ? 'on' : ''}" onclick="qsPickCustomer('${String(c.id).replace(/'/g, '')}')">${esc(c.name)}</button>`;
+    });
+    if (typed) html += `<button type="button" class="qs-chip on">${esc(typed)}</button>`;
+    html += `<button type="button" class="qs-chip qs-chip-more" onclick="qsCustomerSheet()"><i class="fas fa-user-plus"></i> عميل آخر</button>`;
+    row.innerHTML = html;
+}
+
+function qsPickCash() {
+    selectedCustomer = null;
+    ['pos-customer-name', 'pos-customer-phone', 'pos-customer-address'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+    const br = document.getElementById('pos-prev-balance-row'); if (br) br.style.display = 'none';
+    const be = document.getElementById('pos-prev-balance'); if (be) be.innerText = '0.00';
+    calculateTotals(); qsCustomers(); qsCloseSheet();
+}
+function qsPickCustomer(id, then) {
+    const c = state.cache.customers.find(x => String(x.id) === String(id));
+    if (!c) return;
+    selectResult('customer', c);
+    try {
+        const r = qsRecentCustomers().filter(x => String(x) !== String(c.id)); r.unshift(c.id);
+        localStorage.setItem('az_recent_customers', JSON.stringify(r.slice(0, 8)));
+    } catch (e) {}
+    qsCustomers(); qsCloseSheet();
+    if (then) qsPay(then);
+}
+function qsCloseSheet() { const sh = document.getElementById('qs-sheet'); if (sh) { sh.style.display = 'none'; sh.innerHTML = ''; } }
+function qsOpenSheet(html) {
+    const sh = document.getElementById('qs-sheet');
+    sh.innerHTML = '<div class="qs-backdrop" onclick="qsCloseSheet()"></div><div class="qs-panel">' + html + '</div>';
+    sh.style.display = 'block';
+}
+
+function qsCustomerSheet(then) {
+    qsOpenSheet(`
+        <h3>اختار العميل</h3>
+        <input id="qs-cs-input" type="search" class="qs-big-input" placeholder="اكتب اسم العميل أو رقمه..." autocomplete="off">
+        <div id="qs-cs-list" class="qs-cs-list"></div>`);
+    const inp = document.getElementById('qs-cs-input');
+    const draw = () => {
+        const q = inp.value.trim().toLowerCase();
+        const all = state.cache.customers;
+        let list;
+        if (q) list = all.filter(c => (c.name || '').toLowerCase().includes(q) || (c.phone && String(c.phone).includes(q))).slice(0, 15);
+        else {
+            const byId = new Map(all.map(c => [String(c.id), c]));
+            list = qsRecentCustomers().map(id => byId.get(String(id))).filter(Boolean);
+            all.forEach(c => { if (list.length < 10 && !list.includes(c)) list.push(c); });
+        }
+        let html = list.map(c => `<button type="button" class="qs-row" onclick="qsPickCustomer('${String(c.id).replace(/'/g, '')}', ${then ? `'${then}'` : 'null'})"><span>${esc(c.name)}</span><small class="${c.balance > 0 ? 'debt' : ''}">${c.balance > 0 ? 'عليه ' + qsNum(c.balance) : esc(c.phone || '')}</small></button>`).join('');
+        if (q && !all.find(c => (c.name || '').toLowerCase() === q)) html += `<button type="button" class="qs-row qs-new" data-name="${esc(inp.value.trim())}" onclick="qsNewCustomer(this.dataset.name, ${then ? `'${then}'` : 'null'})"><span>+ عميل جديد: ${esc(inp.value.trim())}</span></button>`;
+        document.getElementById('qs-cs-list').innerHTML = html;
+    };
+    inp.addEventListener('input', draw); draw();
+    setTimeout(() => inp.focus(), 50);
+}
+function qsNewCustomer(name, then) {
+    selectedCustomer = null;
+    document.getElementById('pos-customer-name').value = name;
+    document.getElementById('pos-customer-phone').value = '';
+    document.getElementById('pos-customer-address').value = '';
+    const br = document.getElementById('pos-prev-balance-row'); if (br) br.style.display = 'none';
+    document.getElementById('pos-prev-balance').innerText = '0.00';
+    calculateTotals(); qsCustomers(); qsCloseSheet();
+    if (then) qsPay(then);
+}
+
+function qsGrid() {
+    const grid = document.getElementById('qs-grid');
+    if (!grid) return;
+    const q = ((document.getElementById('qs-search') || {}).value || '').trim().toLowerCase();
+    const fq = qsFreq();
+    let list;
+    if (q) {
+        const a = [], b = [];
+        for (const p of state.cache.products) {
+            const n = (p.name || '').toLowerCase();
+            if (n.startsWith(q)) a.push(p); else if (n.includes(q) || (p.barcode && String(p.barcode).includes(q))) b.push(p);
+            if (a.length + b.length >= 30) break;
+        }
+        list = a.concat(b);
+    } else {
+        list = state.cache.products.slice().sort((x, y) => (fq[y.id] || 0) - (fq[x.id] || 0)).slice(0, 12);
+    }
+    grid.innerHTML = list.length ? list.map(p => {
+        const inCart = cart.filter(i => String(i.id) === String(p.id)).reduce((s, i) => s + i.qty, 0);
+        return `<button type="button" class="qs-tile ${p.stock <= 0 ? 'out' : ''}" onclick="qsAdd('${String(p.id).replace(/'/g, '')}')">${inCart ? `<span class="qs-badge">${inCart}</span>` : ''}<span class="qs-tn">${esc(p.name)}</span><span class="qs-tp">${qsNum(p.salePrice)} ج</span></button>`;
+    }).join('') : '<div class="qs-empty">مفيش منتج بالاسم ده</div>';
+}
+function qsAdd(id) {
+    const p = state.cache.products.find(x => String(x.id) === String(id));
+    if (p) addToCart(p);
+}
+
+function qsRender() {
+    const c = document.getElementById('qs-cart');
+    if (!c) return;
+    c.innerHTML = cart.length ? cart.map((it, i) => {
+        const changed = it.originalPrice != null && Math.abs(it.actualPrice - it.originalPrice) > 0.004;
+        return `<div class="qs-line" data-i="${i}">
+            <div class="ql-name">${esc(it.name)}${it.selectedUnit === 'علبة' ? ' <small>(علبة)</small>' : ''}</div>
+            <button type="button" class="ql-price ${changed ? 'changed' : ''}" onclick="qsEditPrice(${i})">${qsNum(it.actualPrice)} ج <i class="fas fa-pen"></i></button>
+            <div class="ql-qty"><button type="button" onclick="qsStep(${i}, -1)">${it.qty <= 1 ? '<i class="fas fa-trash"></i>' : '&minus;'}</button><b>${it.qty}</b><button type="button" onclick="qsStep(${i}, 1)">+</button></div>
+            <div class="ql-total">${qsNum(it.actualPrice * it.qty)}</div>
+        </div>`;
+    }).join('') : '<div class="qs-hint">اضغط على المنتج عشان يتضاف</div>';
+    const t = cart.reduce((s, it) => s + it.actualPrice * it.qty, 0);
+    const el = document.getElementById('qs-total'); if (el) el.textContent = qsNum(t);
+    qsGrid();
+    // swipe a line sideways to remove it
+    c.querySelectorAll('.qs-line').forEach(line => {
+        let x0 = null;
+        line.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+        line.addEventListener('touchend', e => {
+            if (x0 === null) return;
+            const dx = e.changedTouches[0].clientX - x0; x0 = null;
+            if (Math.abs(dx) > 90) removeFromCart(+line.dataset.i);
+        });
+    });
+}
+function qsStep(i, d) {
+    if (!cart[i]) return;
+    if (cart[i].qty + d < 1) { removeFromCart(i); return; }
+    cart[i].qty += d; renderCart();
+}
+function qsEditPrice(i) {
+    const it = cart[i]; if (!it) return;
+    qsOpenSheet(`
+        <h3>${esc(it.name)}</h3>
+        <div class="qs-sub">السعر الأصلي: ${qsNum(it.originalPrice != null ? it.originalPrice : it.actualPrice)} ج</div>
+        <input id="qs-price-input" type="number" inputmode="decimal" class="qs-big-input qs-num" value="${it.actualPrice}">
+        <button type="button" class="qs-ok" onclick="qsSetPrice(${i})">تم</button>`);
+    const inp = document.getElementById('qs-price-input');
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') qsSetPrice(i); });
+    setTimeout(() => { inp.focus(); inp.select(); }, 60);
+}
+function qsSetPrice(i) {
+    const v = parseFloat(document.getElementById('qs-price-input').value);
+    if (!isNaN(v) && v >= 0 && cart[i]) { cart[i].actualPrice = v; }
+    qsCloseSheet(); renderCart();
+}
+
+function qsPay(mode) {
+    if (!cart.length) return showToast('اختار منتج الأول', 'warning');
+    const hasCust = !!selectedCustomer || !!document.getElementById('pos-customer-name').value.trim();
+    if (mode === 'credit' && !hasCust) { qsCustomerSheet('credit'); return; }
+    const sub = cart.reduce((s, it) => s + it.actualPrice * it.qty, 0);
+    const prev = parseFloat(document.getElementById('pos-prev-balance').innerText) || 0;
+    const name = (selectedCustomer && selectedCustomer.name) || document.getElementById('pos-customer-name').value.trim();
+    qsOpenSheet(`
+        <h3>${mode === 'cash' ? 'بيع كاش' : 'بيع آجل'}${name ? ' - ' + esc(name) : ''}</h3>
+        <div class="qs-sum"><span>${cart.reduce((s, it) => s + it.qty, 0)} قطعة / ${cart.length} صنف</span><b>${qsNum(sub)} ج</b></div>
+        ${mode === 'credit' && prev > 0 ? `<div class="qs-sub">حسابه السابق ${qsNum(prev)} ج، هيبقى ${qsNum(prev + sub)} ج</div>` : ''}
+        ${mode === 'credit' ? `<div class="qs-part"><label>دفع جزء دلوقتي؟</label><input id="qs-part" type="number" inputmode="decimal" placeholder="0"></div>` : ''}
+        <button type="button" class="qs-ok ${mode}" id="qs-confirm">${mode === 'cash' ? 'تأكيد وحفظ (كاش)' : 'تأكيد وحفظ (آجل)'}</button>
+        <button type="button" class="qs-cancel" onclick="qsCloseSheet()">رجوع</button>`);
+    document.getElementById('qs-confirm').onclick = async () => {
+        let paid = mode === 'cash' ? sub : 0;
+        const part = document.getElementById('qs-part');
+        if (part && parseFloat(part.value) > 0) paid = Math.min(sub, parseFloat(part.value));
+        document.getElementById('pos-paid-amount').value = paid.toFixed(2);
+        calculateTotals();
+        qsCloseSheet();
+        await handleSaveInvoice(false);
+    };
+}
+
+// Calm phone look: hide secondary export buttons; light by default, night button saved across reloads
+(function azCalm() {
+    if (!window.matchMedia || !window.matchMedia('(max-width: 768px)').matches) return;
+    const saved = () => { try { return localStorage.getItem('az_theme') === 'light' ? 'light' : 'dark'; } catch (e) { return 'light'; } };
+    function apply(th) {
+        const b = document.body; if (!b) return;
+        b.classList.remove('dark-mode', 'light-mode'); b.classList.add(th + '-mode');
+        try { state.theme = th; } catch (e) {}
+        const btn = document.getElementById('az-night');
+        if (btn) btn.innerHTML = th === 'dark' ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
+        const t = document.getElementById('theme-toggle');
+        if (t) { const i = t.querySelector('i'), sp = t.querySelector('span'); if (i) i.className = th === 'dark' ? 'fas fa-sun' : 'fas fa-moon'; if (sp) sp.innerText = th === 'dark' ? 'الوضع المضيء' : 'الوضع الليلي'; }
+    }
+    function toggle(e) {
+        if (e) { e.preventDefault(); e.stopImmediatePropagation(); }
+        const th = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
+        try { localStorage.setItem('az_theme', th); } catch (x) {}
+        apply(th);
+    }
+    function build() {
+        const bar = document.querySelector('.top-bar'); if (!bar || document.getElementById('az-night')) return;
+        const b = document.createElement('button'); b.id = 'az-night'; b.type = 'button'; b.setAttribute('aria-label', 'الوضع الليلي');
+        b.addEventListener('click', toggle); bar.insertBefore(b, bar.firstChild);
+        apply(saved());
+    }
+    function mark() {
+        build();
+        document.querySelectorAll('.page-header button, .page-header .btn, .table-actions button').forEach(b => {
+            if (/تصدير|استيراد|Excel|إكسل/.test(b.textContent) && !b.classList.contains('az-secondary')) b.classList.add('az-secondary');
+        });
+    }
+    document.addEventListener('click', e => { const t = e.target.closest && e.target.closest('#theme-toggle'); if (t) toggle(e); }, true);
+    apply(saved());
+    let tm = null;
+    new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(mark, 80); }).observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', () => { mark(); apply(saved()); });
+})();
+
+// numbers: Latin digits (0-9) inside number inputs, regardless of the Arabic page language
+(function azLatinDigits() {
+    function fix() { document.querySelectorAll('input[type="number"]:not([lang])').forEach(i => i.setAttribute('lang', 'en')); }
+    let tm = null;
+    new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(fix, 50); }).observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', fix);
+    fix();
+})();

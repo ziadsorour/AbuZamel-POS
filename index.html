@@ -37,6 +37,7 @@
                     <li class="nav-item" data-page="settlement"><i class="fas fa-file-invoice-dollar"></i> <span>تقفيلة المناديب</span></li>
                     <li class="nav-item" data-page="expenses"><i class="fas fa-file-invoice-dollar"></i> <span>المصاريف</span></li>
                     <li class="nav-item" data-page="reports"><i class="fas fa-file-contract"></i> <span>التقارير</span></li>
+                    <li class="nav-item" data-page="my-invoices" style="display:none"><i class="fas fa-receipt"></i> <span>فواتيري</span></li>
                     <li class="nav-item" data-page="settings"><i class="fas fa-cog"></i> <span>الإعدادات</span></li>
                 </ul>
             </nav>
@@ -63,6 +64,7 @@
                     <div class="user-profile">
                         <span>المدير Admin</span>
                         <i class="fas fa-user-circle"></i>
+                        <button id="logout-btn" class="btn" style="display:none;margin-right:8px;padding:4px 10px" onclick="azLogout()" title="تسجيل الخروج"><i class="fas fa-sign-out-alt"></i></button>
                     </div>
                 </div>
             </header>
@@ -81,6 +83,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="core/config.js"></script>
+    <script src="core/remote-db.js"></script>
     <script src="core/db.js"></script>
     <script src="core/app.js"></script>
 

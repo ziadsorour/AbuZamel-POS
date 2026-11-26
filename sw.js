@@ -1,4 +1,4 @@
-const CACHE_NAME = 'abuzamel-pos-v13'; // Updated after system review fixes
+const CACHE_NAME = 'abuzamel-pos-v30'; // online mode
 
 const ASSETS = [
   './',
@@ -6,6 +6,8 @@ const ASSETS = [
   './core/style.css',
   './core/app.js',
   './core/db.js',
+  './core/config.js',
+  './core/remote-db.js',
   './core/manifest.json',
   './core/app-icon.png',
   './core/logo.jpg',
@@ -33,13 +35,16 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
+  if (new URL(req.url).hostname.endsWith('.supabase.co')) return; // never cache API traffic
 
   event.respondWith(
     caches.match(req).then((cached) => {
       if (cached) return cached;
       return fetch(req)
         .then((res) => {
-          if (!res || res.status !== 200) return res;
+          // Cross-origin CDN files (Chart.js, XLSX, jsPDF, fonts) come back as opaque responses (status 0).
+          // Cache them too so charts and Excel export keep working offline.
+          if (!res || (res.status !== 200 && res.type !== 'opaque')) return res;
           const copy = res.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy)).catch(() => {});
           return res;

@@ -178,4 +178,4 @@ class Database {
     }
 }
 
-const db = new Database();
+const db = (typeof window !== 'undefined' && window.RemoteDatabase) ? new window.RemoteDatabase() : new Database();

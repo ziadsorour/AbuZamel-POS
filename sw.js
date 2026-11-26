@@ -1,4 +1,4 @@
-const CACHE_NAME = 'abuzamel-pos-v28'; // online mode
+const CACHE_NAME = 'abuzamel-pos-v29'; // online mode
 
 const ASSETS = [
   './',

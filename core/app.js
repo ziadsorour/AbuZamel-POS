@@ -344,7 +344,6 @@ async function loadPage(page) {
             case 'settlement': await renderSettlement(); break;
             case 'settings': await renderSettings(); break;
             case 'my-invoices': await renderMyInvoices(); break;
-            case 'barcodes': await renderBarcodes(); break;
             case 'customer-ledger': {
                 const urlParams = new URLSearchParams(window.location.search);
                 const id = urlParams.get('id');

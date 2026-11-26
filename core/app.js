@@ -1,3 +1,12 @@
+// Escape user-entered text before putting it into innerHTML / print HTML
+function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+// Round money to 2 decimals (avoids 0.8999999999999999 style values)
+function round2(n) {
+    return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+}
+
 // --- Global Guard & Error Handling (MUST BE FIRST) ---
 window.onerror = function(msg, url, lineNo, columnNo, error) {
     // Ignore cross-origin script errors (line 0 from CDNs)
@@ -400,7 +409,7 @@ async function renderDashboard() {
                         ${lowStock.length > 0 ? lowStock.slice(0, 10).map(p => `
                             <div class="alert-item error">
                                 <i class="fas fa-exclamation-triangle"></i>
-                                <span>${p.name} (${p.stock} قطعة)</span>
+                                <span>${esc(p.name)} (${p.stock} قطعة)</span>
                             </div>
                         `).join('') : '<p class="empty-msg">لا يوجد تنبيهات حالياً</p>'}
                     </div>
@@ -703,7 +712,7 @@ function renderSearchResults(items, container, type) {
     }
     container.innerHTML = items.map(item => `
         <div class="result-item" tabindex="0" onclick="selectResult('${type}', ${JSON.stringify(item).replace(/"/g, '&quot;')})">
-            ${type === 'product' ? `${item.name} (${item.salePrice} ج.م)` : `${item.name} - ${item.phone}`}
+            ${type === 'product' ? `${esc(item.name)} (${item.salePrice} ج.م)` : `${esc(item.name)} - ${esc(item.phone)}`}
         </div>
     `).join('');
     container.style.display = 'block';
@@ -895,8 +904,8 @@ function renderProductRows(products) {
     if (products.length === 0) return '<tr><td colspan="7" style="text-align:center">لا توجد منتجات</td></tr>';
     return products.map(p => `
         <tr class="${p.stock <= p.minStock ? 'low-stock-row' : ''}">
-            <td>${p.barcode}</td>
-            <td>${p.name}</td>
+            <td>${esc(p.barcode)}</td>
+            <td>${esc(p.name)}</td>
             <td>${p.purchasePrice}</td>
             <td>${p.salePrice}</td>
             <td>${p.unit || 'قطعة'} (${p.piecesPerBox || 1})</td>
@@ -1009,8 +1018,8 @@ function renderCart() {
         return `
             <tr>
                 <td>
-                    <div style="font-weight:700">${item.name}</div>
-                    <div style="font-size:0.7rem; color:var(--text-muted)">${item.barcode}</div>
+                    <div style="font-weight:700">${esc(item.name)}</div>
+                    <div style="font-size:0.7rem; color:var(--text-muted)">${esc(item.barcode)}</div>
                 </td>
                 <td>
                     <select onchange="updateUnit(${index}, this.value)" 
@@ -1138,10 +1147,10 @@ async function handleSaveInvoice(print = false) {
     const prevBalance = parseFloat(document.getElementById('pos-prev-balance').innerText) || 0;
     const paidAmount = parseFloat(document.getElementById('pos-paid-amount').value) || 0;
     
-    const subTotal = cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0); 
-    const taxAmount = (subTotal - discount) * (taxValue / 100);
-    const finalTotal = subTotal - discount + taxAmount + prevBalance;
-    const remainingBalance = finalTotal - paidAmount;
+    const subTotal = round2(cart.reduce((sum, item) => sum + (item.actualPrice * item.qty), 0)); 
+    const taxAmount = round2((subTotal - discount) * (taxValue / 100));
+    const finalTotal = round2(subTotal - discount + taxAmount + prevBalance);
+    const remainingBalance = round2(finalTotal - paidAmount);
 
     // Auto-save/update customer
     let customerId = selectedCustomer ? selectedCustomer.id : null;
@@ -1338,9 +1347,9 @@ function renderCustomerRows(customers) {
     if (customers.length === 0) return '<tr><td colspan="6" style="text-align:center">لا يوجد عملاء</td></tr>';
     return customers.map(c => `
         <tr>
-            <td>${c.name}</td>
-            <td>${c.phone}</td>
-            <td>${c.address || '-'}</td>
+            <td>${esc(c.name)}</td>
+            <td>${esc(c.phone)}</td>
+            <td>${esc(c.address || '-')}</td>
             <td>0.00</td>
             <td>${(c.balance || 0).toFixed(2)}</td>
             <td style="white-space: nowrap;">
@@ -1491,7 +1500,7 @@ async function renderWarehouse() {
                         <div class="input-group">
                             <label>المنتج</label>
                             <select id="stock-prod-id" required>
-                                ${products.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                                ${products.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}
                             </select>
                         </div>
                         <div class="input-group">
@@ -1570,7 +1579,7 @@ function renderInventoryLogs(logs, products) {
         return `
             <tr>
                 <td>${new Date(log.date).toLocaleString('ar-EG')}</td>
-                <td>${product ? product.name : 'منتج محذوف'}</td>
+                <td>${esc(product ? product.name : 'منتج محذوف')}</td>
                 <td class="${typeClass}">${log.qty > 0 ? '+' : ''}${log.qty}</td>
                 <td>${typeLabel}</td>
                 <td>${log.ref || '-'}</td>
@@ -1671,9 +1680,9 @@ function renderAgentRows(agents) {
     if (agents.length === 0) return '<tr><td colspan="6" style="text-align:center">لا يوجد مناديب</td></tr>';
     return agents.map(a => `
         <tr>
-            <td>${a.name}</td>
-            <td>${a.phone}</td>
-            <td>${a.address || '-'}</td>
+            <td>${esc(a.name)}</td>
+            <td>${esc(a.phone)}</td>
+            <td>${esc(a.address || '-')}</td>
             <td>${a.commission}%</td>
             <td>0.00</td>
             <td>
@@ -1809,9 +1818,9 @@ function renderExpenseRows(expenses) {
     return sorted.map(e => `
         <tr>
             <td>${new Date(e.date).toLocaleDateString('ar-EG')}</td>
-            <td>${e.category}</td>
+            <td>${esc(e.category)}</td>
             <td class="text-danger">${e.amount.toFixed(2)}</td>
-            <td>${e.note || '-'}</td>
+            <td>${esc(e.note || '-')}</td>
             <td>
                 <button class="btn-delete" onclick="deleteExpense(${e.id})" title="حذف"><i class="fas fa-trash"></i> حذف</button>
             </td>
@@ -1956,7 +1965,7 @@ function renderInvoiceReportRows(invoices) {
         <tr>
             <td>#${inv?.id ?? '-'}</td>
             <td>${inv?.date ? new Date(inv.date).toLocaleString('ar-EG') : '-'}</td>
-            <td>${inv?.customer?.name || inv?.customerName || 'غير محدد'}</td>
+            <td>${esc(inv?.customer?.name || inv?.customerName || 'غير محدد')}</td>
             <td>${fmt2(inv?.total)}</td>
             <td>${fmt2(inv?.paid)}</td>
             <td>${fmt2(inv?.remaining)}</td>
@@ -2055,9 +2064,9 @@ function renderPaymentReportRows(payments) {
         <tr>
             <td>#${p.id}</td>
             <td>${new Date(p.date).toLocaleString('ar-EG')}</td>
-            <td>${p.customer?.name || p.customerName || 'عميل'}</td>
+            <td>${esc(p.customer?.name || p.customerName || 'عميل')}</td>
             <td class="text-success" style="font-weight:700">${p.amount.toFixed(2)}</td>
-            <td>${p.note || '-'}</td>
+            <td>${esc(p.note || '-')}</td>
             <td>
                 <button class="btn-edit" title="تعديل" style="padding: 4px 8px;" onclick="editPayment('customer', ${p.id})"><i class="fas fa-edit"></i></button>
                 <button class="btn-edit" title="طباعة الوصل" style="padding: 4px 8px;" onclick="reprintPaymentReceipt(${JSON.stringify(p).replace(/"/g, '&quot;')})"><i class="fas fa-print"></i></button>
@@ -2122,7 +2131,7 @@ async function viewInvoiceDetails(id) {
 
     const itemsHtml = inv.items.map(it => `
         <tr>
-            <td style="padding: 4px 8px; text-align:right;">${it.name}</td>
+            <td style="padding: 4px 8px; text-align:right;">${esc(it.name)}</td>
             <td style="padding: 4px 8px; text-align:center;">${it.qty}</td>
             <td style="padding: 4px 8px; text-align:center;">${Number(it.salePrice).toFixed(2)}</td>
             <td style="padding: 4px 8px; text-align:center; font-weight:700;">${(it.qty * it.salePrice).toFixed(2)}</td>
@@ -2138,7 +2147,7 @@ async function viewInvoiceDetails(id) {
                 <button class="modal-close" onclick="this.closest('.modal').remove()">&times;</button>
             </div>
             <div class="modal-body">
-                <p><strong>العميل:</strong> ${inv.customer?.name || 'نقدي'}</p>
+                <p><strong>العميل:</strong> ${esc(inv.customer?.name || 'نقدي')}</p>
                 <p><strong>التاريخ:</strong> ${new Date(inv.date).toLocaleString('ar-EG')}</p>
                 <table class="modern-table" style="width:100%; margin-top:1rem;">
                     <thead><tr>
@@ -2275,7 +2284,7 @@ async function showReturnModal(invoiceId) {
     const items = Array.isArray(inv.items) ? inv.items : [];
     const rows = items.map((it, idx) => `
         <tr>
-            <td style="text-align:right; font-weight:700;">${it.name || '-'}</td>
+            <td style="text-align:right; font-weight:700;">${esc(it.name || '-')}</td>
             <td style="text-align:center">${format2(it.salePrice)}</td>
             <td style="text-align:center">${Number(it.qty) || 0}</td>
             <td style="text-align:center">
@@ -2304,8 +2313,8 @@ async function showReturnModal(invoiceId) {
         <div class="modal-content return-modal-content" style="max-width: 980px;">
             <h3>مرتجع من الفاتورة #${invoiceId}</h3>
             <div style="margin: 0.5rem 0; color: var(--text-muted); font-size: 0.9rem;">
-                العميل: <b>${inv?.customer?.name || 'غير محدد'}</b>
-                ${inv?.customer?.phone ? ` - هاتف: ${inv.customer.phone}` : ''}
+                العميل: <b>${esc(inv?.customer?.name || 'غير محدد')}</b>
+                ${inv?.customer?.phone ? ` - هاتف: ${esc(inv.customer.phone)}` : ''}
             </div>
             <div class="return-toolbar">
                 <button type="button" class="btn btn-new" onclick="setAllReturnQty('max')"><i class="fas fa-check-double"></i> إرجاع الكل</button>
@@ -2681,7 +2690,7 @@ async function renderSuppliers() {
         items: []
     };
 
-    const supplierOpts = (suppliers || []).map(s => `<option value="${s.id}">${s.name}</option>`).join('');
+    const supplierOpts = (suppliers || []).map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
     const recentPurchases = (purchases || []).slice(-20).reverse();
 
     contentArea.innerHTML = `
@@ -2716,9 +2725,9 @@ async function renderSuppliers() {
                     <tbody>
                         ${(suppliers || []).length ? suppliers.map(s => `
                             <tr>
-                                <td style="font-weight:800;">${s.name}</td>
-                                <td>${s.phone || '-'}</td>
-                                <td>${s.address || '-'}</td>
+                                <td style="font-weight:800;">${esc(s.name)}</td>
+                                <td>${esc(s.phone || '-')}</td>
+                                <td>${esc(s.address || '-')}</td>
                                 <td>${(Number(purchasesBySupplier[s.id]) || 0).toFixed(2)}</td>
                                 <td style="font-weight:800; color: var(--danger);">${((s.balance || 0) + (s.initialBalance || 0)).toFixed(2)} ج.م</td>
                                 <td style="white-space: nowrap;">
@@ -2918,7 +2927,7 @@ function supSearchProducts(query) {
     }
     results.innerHTML = list.map(p => `
       <div class="result-item" onclick="supSelectProduct(${p.id})">
-        ${p.name} <span style="opacity:.7;">(مخزون: ${p.stock})</span>
+        ${esc(p.name)} <span style="opacity:.7;">(مخزون: ${p.stock})</span>
       </div>
     `).join('');
     results.style.display = 'block';
@@ -2937,7 +2946,7 @@ function supSelectProduct(productId) {
     if (input) input.value = p.name;
     if (chip) {
         chip.style.display = 'block';
-        chip.innerHTML = `تم اختيار: <b>${p.name}</b> <span style="opacity:.7;">(باركود: ${p.barcode || '-'})</span> <button type="button" class="return-chip" style="margin-right:8px;" onclick="supClearSelected()">تغيير</button>`;
+        chip.innerHTML = `تم اختيار: <b>${esc(p.name)}</b> <span style="opacity:.7;">(باركود: ${esc(p.barcode || '-')})</span> <button type="button" class="return-chip" style="margin-right:8px;" onclick="supClearSelected()">تغيير</button>`;
     }
     const price = document.getElementById('sup-price');
     if (price && (!Number(price.value) || Number(price.value) === 0)) {
@@ -2986,7 +2995,7 @@ function supRenderItems() {
 
     body.innerHTML = st.items.map((it, i) => `
       <tr>
-        <td style="font-weight:800;">${it.name}</td>
+        <td style="font-weight:800;">${esc(it.name)}</td>
         <td>${it.qty}</td>
         <td>${Number(it.purchasePrice).toFixed(2)}</td>
         <td style="font-weight:900;">${Number(it.total).toFixed(2)}</td>
@@ -3179,8 +3188,8 @@ async function showPurchaseModal() {
     modal.style.display = 'flex';
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
 
-    const supplierOpts = suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
-    const productOpts = products.map(p => `<option value="${p.id}">${p.name} (مخزون: ${p.stock})</option>`).join('');
+    const supplierOpts = suppliers.map(s => `<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    const productOpts = products.map(p => `<option value="${p.id}">${esc(p.name)} (مخزون: ${p.stock})</option>`).join('');
 
     modal.innerHTML = `
       <div class="modal-content" style="max-width: 900px;">
@@ -3281,7 +3290,7 @@ function renderPurchaseItems() {
 
     body.innerHTML = st.items.map((it, i) => `
       <tr>
-        <td>${it.name}</td>
+        <td>${esc(it.name)}</td>
         <td>${it.qty}</td>
         <td>${it.purchasePrice.toFixed(2)}</td>
         <td>${it.total.toFixed(2)}</td>
@@ -3394,8 +3403,8 @@ async function renderAudit() {
             <tbody id="audit-body">
               ${(products || []).length ? products.map((p,i)=>`
                 <tr>
-                  <td style="font-weight:800;">${p.name}</td>
-                  <td>${p.barcode || '-'}</td>
+                  <td style="font-weight:800;">${esc(p.name)}</td>
+                  <td>${esc(p.barcode || '-')}</td>
                   <td id="audit-sys-${p.id}">${Number(p.stock)||0}</td>
                   <td>
                     <input class="table-qty-input" style="width:90px;" type="number" value="${Number(p.stock)||0}"
@@ -3548,7 +3557,7 @@ function sumPaidForAgent(invoices, agentId, date) {
 }
 
 function renderSettlementEntryCard(agents, invoices, date) {
-    const opts = (agents || []).map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+    const opts = (agents || []).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('');
     return `
         <div class="card" style="margin-top: 1.5rem;">
             <h3 style="margin-bottom: 1rem;">تقفيل مندوب</h3>
@@ -3679,7 +3688,7 @@ function renderSettlementRows(agents, invoices, date) {
 
     const rowsAsArray = agents.map(a => `
         <tr>
-            <td>${a.name}</td>
+            <td>${esc(a.name)}</td>
             <td>${agentSales[a.id].total.toFixed(2)}</td>
             <td style="font-weight: 700; color: var(--success);">${agentSales[a.id].paid.toFixed(2)}</td>
         </tr>
@@ -3760,7 +3769,7 @@ async function refreshSettlementHistory(date) {
                             <td>${fmt2(r.actual)}</td>
                             <td dir="ltr" class="${diff < 0 ? 'text-danger' : diff > 0 ? 'text-success' : 'text-primary'}">${fmt2(diff)}</td>
                             <td class="${statusClass(r.status)}">${statusLabel(r.status)}</td>
-                            <td>${r.note || '-'}</td>
+                            <td>${esc(r.note || '-')}</td>
                             <td>
                                 <button class="btn-delete" onclick="deleteSettlement(${r.id}, '${date}')" title="حذف التقفيلة"><i class="fas fa-trash"></i> حذف</button>
                             </td>
@@ -3777,7 +3786,7 @@ async function printThermalInvoice(inv, id) {
 
     const itemsHtml = inv.items.map((item, idx) => `
         <tr class="item-row">
-            <td class="item-name">${item.name}</td>
+            <td class="item-name">${esc(item.name)}</td>
             <td class="item-unit">${item.selectedUnit || 'قطعة'}</td>
             <td class="item-price">${Number(item.salePrice).toFixed(2)}</td>
             <td class="item-qty">${item.qty}</td>
@@ -3813,10 +3822,10 @@ async function printThermalInvoice(inv, id) {
 
             <div class="customer-section">
                 <div class="cust-row-top">
-                    <span>إلى أ / : ${inv.customer.name || 'نقدي'}</span>
-                    <span style="font-size: 10px;">هاتف: ${inv.customer.phone || '-'}</span>
+                    <span>إلى أ / : ${esc(inv.customer.name || 'نقدي')}</span>
+                    <span style="font-size: 10px;">هاتف: ${esc(inv.customer.phone || '-')}</span>
                 </div>
-                <div class="cust-row">العنوان: ${inv.customer.address || '-'}</div>
+                <div class="cust-row">العنوان: ${esc(inv.customer.address || '-')}</div>
             </div>
 
             <table class="receipt-table">
@@ -4002,7 +4011,7 @@ async function printPaymentReceipt(payment) {
                         <span>إجمالي الحساب المتبقي:</span>
                         <span>${payment.remaining.toFixed(2)} ج.م</span>
                     </div>
-                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${payment.note}</div>` : ''}
+                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${esc(payment.note)}</div>` : ''}
                 </div>
                 <div class="footer">
                     <div style="font-weight: 800; border-bottom: 1.2px dashed #000; margin-bottom: 4px; padding-bottom: 4px;">توقيع المستلم: .....................</div>
@@ -4104,8 +4113,8 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
             <div class="header-title">
                 <i class="fas fa-book-open" style="color: var(--primary); font-size: 1.5rem;"></i>
                 <div>
-                    <h2>كشف حساب العميل: ${customer.name}</h2>
-                    <p style="font-size: 0.9rem; color: var(--text-muted);">${customer.phone || 'بدون هاتف'}</p>
+                    <h2>كشف حساب العميل: ${esc(customer.name)}</h2>
+                    <p style="font-size: 0.9rem; color: var(--text-muted);">${esc(customer.phone || 'بدون هاتف')}</p>
                 </div>
             </div>
             <div class="header-actions">
@@ -4564,8 +4573,8 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             <div class="header-title">
                 <i class="fas fa-truck-ramp-box" style="color: var(--secondary); font-size: 1.5rem;"></i>
                 <div>
-                    <h2>كشف حساب المورد: ${supplier.name}</h2>
-                    <p style="font-size: 0.9rem; color: var(--text-muted);">${supplier.phone || 'بدون هاتف'}</p>
+                    <h2>كشف حساب المورد: ${esc(supplier.name)}</h2>
+                    <p style="font-size: 0.9rem; color: var(--text-muted);">${esc(supplier.phone || 'بدون هاتف')}</p>
                 </div>
             </div>
             <div class="header-actions">
@@ -4713,7 +4722,7 @@ async function printSupplierPaymentReceipt(payment) {
                         <span>المتبقي للمورد:</span>
                         <span>${(payment.remaining || 0).toFixed(2)} ج.م</span>
                     </div>
-                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${payment.note}</div>` : ''}
+                    ${payment.note ? `<div style="margin-top: 5px; font-size: 11px; color: #000; font-weight: 900;">ملاحظات: ${esc(payment.note)}</div>` : ''}
                 </div>
                 <div class="footer">
                     <div style="font-weight: 800; border-bottom: 1.2px dashed #000; margin-bottom: 4px; padding-bottom: 4px;">توقيع المستلم: .....................</div>
@@ -4740,7 +4749,7 @@ async function printCustomerStatement(customerId) {
     executeHiddenPrint(`
         <html>
         <head>
-            <title>كشف حساب - ${customer.name}</title>
+            <title>كشف حساب - ${esc(customer.name)}</title>
             <style>
                 body { direction: rtl; font-family: 'Cairo', sans-serif; padding: 20px; }
                 table { width: 100%; border-collapse: collapse; margin-top: 20px; }
@@ -4754,7 +4763,7 @@ async function printCustomerStatement(customerId) {
             <div class="header">
                 <h1>أبوزامل للتجارة والتوزيع</h1>
                 <h2>كشف حساب عميل</h2>
-                <p>العميل: ${customer.name} | الهاتف: ${customer.phone}</p>
+                <p>العميل: ${esc(customer.name)} | الهاتف: ${esc(customer.phone)}</p>
             </div>
             <table>
                 <thead>
@@ -4812,7 +4821,7 @@ async function printSupplierStatement(supplierId) {
     iframe.contentDocument.write(`
         <html>
         <head>
-            <title>كشف حساب مورد - ${supplier.name}</title>
+            <title>كشف حساب مورد - ${esc(supplier.name)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
                 body { direction: rtl; font-family: 'Cairo', sans-serif; padding: 20px; color: #000; }
@@ -4832,7 +4841,7 @@ async function printSupplierStatement(supplierId) {
             <div class="header">
                 <h1>أبوزامل للتجارة والتوزيع</h1>
                 <h2>كشف حساب المورد</h2>
-                <p><strong>المورد:</strong> ${supplier.name} | <strong>الهاتف:</strong> ${supplier.phone || '-'}</p>
+                <p><strong>المورد:</strong> ${esc(supplier.name)} | <strong>الهاتف:</strong> ${esc(supplier.phone || '-')}</p>
             </div>
             <table>
                 <thead>
@@ -4935,7 +4944,7 @@ async function renderBestAgent(invoices, agents) {
     return `
         <div class="best-agent-card">
             <i class="fas fa-crown"></i>
-            <h4>${agent ? agent.name : 'غير معروف'}</h4>
+            <h4>${esc(agent ? agent.name : 'غير معروف')}</h4>
             <p>إجمالي المبيعات: ${max.toFixed(2)} ج.م</p>
         </div>
     `;

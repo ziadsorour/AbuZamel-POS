@@ -1,4 +1,4 @@
-const CACHE_NAME = 'abuzamel-pos-v13'; // Updated after system review fixes
+const CACHE_NAME = 'abuzamel-pos-v14'; // bumped after escape + rounding fixes
 
 const ASSETS = [
   './',

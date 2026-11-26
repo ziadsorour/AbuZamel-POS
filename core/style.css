@@ -1122,3 +1122,23 @@ body {
     padding: 2rem;
     color: var(--text-muted);
 }
+
+
+/* ===== Online mode ===== */
+#login-overlay { position: fixed; inset: 0; z-index: 99999; background: #050a1f; display: flex; align-items: center; justify-content: center; padding: 16px; }
+#login-overlay .login-card { background: #0d1530; border: 1px solid #243056; border-radius: 14px; padding: 28px; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 12px; color: #fff; text-align: center; }
+#login-overlay .login-card h2 { margin: 0; font-size: 1.3rem; }
+#login-overlay .login-sub { margin: 0 0 6px; color: #9aa7d1; }
+#login-overlay input { padding: 12px; border-radius: 8px; border: 1px solid #2c3a66; background: #08102a; color: #fff; font-size: 1rem; text-align: right; }
+#login-overlay .login-err { color: #ff6b6b; min-height: 1.2em; font-size: .9rem; }
+#offline-banner { display: none; position: fixed; top: 0; left: 0; right: 0; z-index: 99998; background: #c0392b; color: #fff; text-align: center; padding: 8px; font-weight: 700; }
+body.role-seller [onclick*="voidInvoice"],
+body.role-seller [onclick*="editInvoice"],
+body.role-seller [onclick*="deleteProduct"],
+body.role-seller [onclick*="deleteCustomer"],
+body.role-seller [onclick*="showProductModal"],
+body.role-seller [onclick*="editProduct"],
+body.role-seller [onclick*="deletePayment"],
+body.role-seller [onclick*="editPayment"],
+body.role-seller [onclick*="recalculateCustomerBalance"],
+body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'abuzamel-pos-v14'; // bumped after escape + rounding fixes
+const CACHE_NAME = 'abuzamel-pos-v15'; // online mode
 
 const ASSETS = [
   './',
@@ -6,6 +6,8 @@ const ASSETS = [
   './core/style.css',
   './core/app.js',
   './core/db.js',
+  './core/config.js',
+  './core/remote-db.js',
   './core/manifest.json',
   './core/app-icon.png',
   './core/logo.jpg',
@@ -33,6 +35,7 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
+  if (new URL(req.url).hostname.endsWith('.supabase.co')) return; // never cache API traffic
 
   event.respondWith(
     caches.match(req).then((cached) => {

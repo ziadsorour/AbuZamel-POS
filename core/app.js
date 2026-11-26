@@ -94,13 +94,17 @@ async function init() {
 
     try {
         await db.init();
-        
+        if (db.isRemote) azApplyUser();
+
         // Pre-load static-ish data into cache for instant searching
         await refreshGlobalCache();
         
         setupGlobalGuards();
         setupEventListeners();
-        loadPage('dashboard');
+        if (db.isRemote) azSetupOnlineBanner();
+        const firstPage = (state.user.role === 'seller') ? 'pos' : 'dashboard';
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.toggle('active', i.getAttribute('data-page') === firstPage));
+        loadPage(firstPage);
     } catch (err) {
         console.error('Initialization failed:', err);
         alert('فشل بدء التشغيل: ' + err.message);
@@ -319,6 +323,7 @@ function setupEventListeners() {
 }
 
 async function loadPage(page) {
+    if (db.isRemote && !azCanOpen(page)) page = 'pos';
     state.currentPage = page;
     contentArea.innerHTML = '<div class="loader-wrapper"><div class="loader"></div></div>';
     
@@ -337,6 +342,7 @@ async function loadPage(page) {
             case 'reports': await renderReports(); break;
             case 'settlement': await renderSettlement(); break;
             case 'settings': await renderSettings(); break;
+            case 'my-invoices': await renderMyInvoices(); break;
             case 'barcodes': await renderBarcodes(); break;
             case 'customer-ledger': {
                 const urlParams = new URLSearchParams(window.location.search);
@@ -533,6 +539,7 @@ let editingInvoiceId = null;
 let editingInvoiceData = null;
 
 async function renderPOS() {
+    if (db.isRemote) await refreshGlobalCache(); // live stock and balances from the shared database
     if (!editingInvoiceId) {
         cart = []; // Reset cart on page load if not editing
         selectedCustomer = null; // Reset selected customer for new invoice
@@ -689,6 +696,10 @@ async function loadAgentsToSelect() {
         opt.innerText = agent.name;
         select.appendChild(opt);
     });
+    if (db.isRemote && state.user.role === 'seller' && state.user.agentId) {
+        select.value = String(state.user.agentId);
+        select.disabled = true;
+    }
 }
 
 function setupPOSListeners() {
@@ -759,6 +770,20 @@ function selectResult(type, item) {
         document.getElementById('product-results').style.display = 'none';
     } else {
         selectedCustomer = item;
+        if (db.isRemote && item && item.id) {
+            // another phone may have changed this customer's balance: re-read it
+            db.getById('customers', item.id).then(fresh => {
+                if (!fresh || !selectedCustomer || selectedCustomer.id !== fresh.id) return;
+                selectedCustomer = fresh;
+                const be = document.getElementById('pos-prev-balance');
+                const br = document.getElementById('pos-prev-balance-row');
+                if (be && br) {
+                    if (fresh.balance && fresh.balance > 0) { br.style.display = 'flex'; be.innerText = fresh.balance.toFixed(2); }
+                    else { br.style.display = 'none'; be.innerText = '0.00'; }
+                    calculateTotals();
+                }
+            }).catch(() => {});
+        }
         document.getElementById('pos-customer-name').value = item.name;
         document.getElementById('pos-customer-phone').value = item.phone;
         document.getElementById('pos-customer-address').value = item.address || '';
@@ -1111,9 +1136,11 @@ function updateUnit(index, unit) {
     // Auto-adjust prices when switching units
     if (unit === 'علبة' && oldUnit === 'قطعة') {
         item.actualPrice = item.actualPrice * (item.piecesPerBox || 1);
+        if (item.originalPrice != null) item.originalPrice = item.originalPrice * (item.piecesPerBox || 1);
         item.purchasePrice = (Number(item.purchasePrice) || 0) * (item.piecesPerBox || 1);
     } else if (unit === 'قطعة' && oldUnit === 'علبة') {
         item.actualPrice = item.actualPrice / (item.piecesPerBox || 1);
+        if (item.originalPrice != null) item.originalPrice = item.originalPrice / (item.piecesPerBox || 1);
         item.purchasePrice = (Number(item.purchasePrice) || 0) / (item.piecesPerBox || 1);
     }
     
@@ -1150,6 +1177,11 @@ async function handleSaveInvoice(print = false) {
     if (cart.length === 0) {
         showToast('السلة فارغة!', 'warning');
         return;
+    }
+    if (db.isRemote) {
+        // fail fast, before anything is written, when the phone has no internet
+        try { await db.rpc('az_me', {}, { retry: false }); }
+        catch (e) { showToast('مفيش اتصال بالإنترنت. الفاتورة لم تُحفظ، جرب تاني لما النت يرجع.', 'error', 5000); return; }
     }
     isSavingInvoice = true;
 
@@ -1240,6 +1272,8 @@ async function handleSaveInvoice(print = false) {
             items: cart.map(item => ({
                 ...item, 
                 salePrice: item.actualPrice, // Use adjusted price
+                originalPrice: round2(item.originalPrice != null ? item.originalPrice : item.actualPrice), // master price when the line was added
+                soldPrice: round2(item.actualPrice), // price the customer actually paid
                 total: round2(item.actualPrice * item.qty)
             })),
             subTotal,
@@ -1968,6 +2002,8 @@ async function renderReports() {
             ` : ''}
         </div>
 
+        ${renderPriceChangesCard(invoices)}
+
         <div class="card reports-table-card" style="margin-top: 2rem">
             <div class="table-actions" style="margin-bottom: 1rem; display: flex; gap: 10px; align-items: center;">
                 <h3 style="margin-bottom: 0">سجل التحصيلات (المدفوعات)</h3>
@@ -2164,25 +2200,17 @@ async function reprintInvoice(id) {
 
 async function printLastInvoice() {
     try {
-        const transaction = db.db.transaction('invoices', 'readonly');
-        const store = transaction.objectStore('invoices');
-        const req = store.openCursor(null, 'prev');
-        
-        req.onsuccess = (e) => {
-            const cursor = e.target.result;
-            if (cursor && cursor.value) {
-                printThermalInvoice(cursor.value, cursor.value.id);
-                showToast('جاري طباعة آخر فاتورة...');
-            } else {
-                showToast('لا توجد فواتير سابقة لطباعتها', 'warning');
-            }
-        };
-        req.onerror = () => {
-            showToast('حدث خطأ أثناء تحميل إخر فاتورة', 'error');
-        };
+        const all = await db.getAll('invoices');
+        const last = all[all.length - 1];
+        if (last) {
+            printThermalInvoice(last, last.id);
+            showToast('جاري طباعة آخر فاتورة...');
+        } else {
+            showToast('لا توجد فواتير سابقة لطباعتها', 'warning');
+        }
     } catch (e) {
         console.error("Print Last Invoice Error: ", e);
-        showToast('فشل في الوصول لقاعدة البيانات لطباعة الفاتورة', 'error');
+        showToast('حدث خطأ أثناء تحميل آخر فاتورة', 'error');
     }
 }
 
@@ -2194,7 +2222,7 @@ async function viewInvoiceDetails(id) {
         <tr>
             <td style="padding: 4px 8px; text-align:right;">${esc(it.name)}</td>
             <td style="padding: 4px 8px; text-align:center;">${it.qty}</td>
-            <td style="padding: 4px 8px; text-align:center;">${Number(it.salePrice).toFixed(2)}</td>
+            <td style="padding: 4px 8px; text-align:center;">${Number(it.salePrice).toFixed(2)}${(it.originalPrice != null && Math.abs(Number(it.originalPrice) - Number(it.salePrice)) > 0.001) ? `<div style="font-size:0.7rem;color:var(--text-muted)">الأصلي ${Number(it.originalPrice).toFixed(2)}</div>` : ''}${it.belowCost ? '<div style="font-size:0.7rem;color:var(--danger)">أقل من التكلفة</div>' : ''}</td>
             <td style="padding: 4px 8px; text-align:center; font-weight:700;">${(it.qty * it.salePrice).toFixed(2)}</td>
         </tr>`).join('');
 
@@ -2665,6 +2693,13 @@ async function renderSettings() {
                 </div>
             </div>
 
+            ${db.isRemote ? `
+            <div class="card settings-card" style="grid-column: 1 / -1;">
+                <h3>المستخدمون (المدير والبياعين)</h3>
+                <p>كل بياع له اسم مستخدم وكلمة سر، ويبيع من موبايله والفواتير بتتسجل في نفس النظام لحظيًا. البياع مش بيقدر يلغي فواتير ولا يعدل سعر المنتج ولا يشوف التكلفة والأرباح.</p>
+                <div id="users-card-body">...</div>
+            </div>` : ''}
+
             <div class="card settings-card" style="border: 1px solid var(--danger);">
                 <h3 style="color: var(--danger);">تهيئة النظام (ضبط المصنع)</h3>
                 <p>سيتم حذف جميع البيانات الموجودة في النظام (المنتجات، العملاء، الفواتير، المصاريف). يرجى التأكد من عمل نسخة احتياطية أولاً.</p>
@@ -2683,6 +2718,7 @@ async function renderSettings() {
             </div>
         </div>
     `;
+    if (db.isRemote) renderUsersCard();
 }
 
 async function exportData() {
@@ -2730,6 +2766,12 @@ async function importData(event) {
                 return;
             }
             if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية. هل أنت متأكد؟')) {
+                if (db.isRemote) {
+                    const counts = await db.importAll(data);
+                    alert('تمت استعادة البيانات بنجاح!\n' + Object.entries(counts).filter(([k, v]) => v > 0).map(([k, v]) => k + ': ' + v).join('\n'));
+                    location.reload();
+                    return;
+                }
                 // Clear and rebuild (IndexedDB)
                 await db.clearAllStores();
 
@@ -4467,7 +4509,7 @@ async function recalculateCustomerBalance(customerId) {
 
         const newBalance = Math.max(0, round2(debit - credit));
         customer.balance = newBalance;
-        await db.update('customers', customer);
+        await db.update('customers', customer, { absolute: true });
         
         showToast('تم إعادة حساب الرصيد بنجاح');
         showCustomerLedger(customerId);
@@ -4506,7 +4548,7 @@ async function recalculateSupplierBalance(supplierId) {
 
         const newBalance = Math.max(0, round2(credit - debit));
         supplier.balance = newBalance;
-        await db.update('suppliers', supplier);
+        await db.update('suppliers', supplier, { absolute: true });
         
         showToast('تم إعادة حساب الرصيد بنجاح');
         showSupplierLedger(supplierId);
@@ -5120,3 +5162,205 @@ function loadAgentIntoSettlement(agentId) {
 
 // Start Application
 window.onload = init;
+
+
+// ================= Online mode (multi-user) =================
+function azCanOpen(page) {
+    if (!state.user || state.user.role !== 'seller') return page !== 'my-invoices';
+    return ['pos', 'products', 'customers', 'my-invoices', 'customer-ledger'].includes(page);
+}
+
+function azApplyUser() {
+    const me = db.me;
+    if (!me) return;
+    state.user = { name: me.name, role: me.role === 'owner' ? 'admin' : 'seller', username: me.username, agentId: me.agent_id };
+    const isSeller = state.user.role === 'seller';
+    document.body.classList.toggle('role-seller', isSeller);
+    document.querySelectorAll('.nav-item').forEach(li => {
+        const page = li.getAttribute('data-page');
+        li.style.display = azCanOpen(page) ? '' : 'none';
+    });
+    const prof = document.querySelector('.user-profile span');
+    if (prof) prof.textContent = (isSeller ? 'بياع: ' : 'المدير: ') + me.name;
+    const logout = document.getElementById('logout-btn');
+    if (logout) logout.style.display = 'inline-flex';
+}
+
+function azSetupOnlineBanner() {
+    let bar = document.getElementById('offline-banner');
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'offline-banner';
+        bar.textContent = 'مفيش اتصال بالإنترنت. لازم النت يكون شغال عشان تحفظ أي فاتورة.';
+        document.body.appendChild(bar);
+    }
+    const update = () => { bar.style.display = navigator.onLine ? 'none' : 'block'; };
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    update();
+}
+
+function azLogout() {
+    if (db.signOut) db.signOut();
+    location.reload();
+}
+window.azOnAuthLost = () => { location.reload(); };
+
+window.azShowLogin = function (database) {
+    return new Promise(async (resolve) => {
+        let needsSetup = false;
+        try { needsSetup = !!(await database.rpc('az_needs_setup', {}, { retry: false })); } catch (e) { /* offline: show the login form */ }
+        const wrap = document.createElement('div');
+        wrap.id = 'login-overlay';
+        wrap.innerHTML = `
+            <form class="login-card" id="login-form" autocomplete="on">
+                <h2>أبوزامل للتجارة والتوزيع</h2>
+                <p class="login-sub">${needsSetup ? 'أول تشغيل: أنشئ حساب المدير' : 'تسجيل الدخول'}</p>
+                ${needsSetup ? '<input id="lg-name" type="text" placeholder="الاسم" autocomplete="name">' : ''}
+                <input id="lg-user" type="text" placeholder="اسم المستخدم" autocomplete="username" autocapitalize="none" required>
+                <input id="lg-pass" type="password" placeholder="كلمة السر" autocomplete="${needsSetup ? 'new-password' : 'current-password'}" required>
+                ${needsSetup ? '<input id="lg-pass2" type="password" placeholder="أعد كتابة كلمة السر" autocomplete="new-password" required>' : ''}
+                <div id="lg-err" class="login-err"></div>
+                <button type="submit" class="btn btn-save" id="lg-btn">${needsSetup ? 'إنشاء الحساب ودخول' : 'دخول'}</button>
+            </form>`;
+        document.body.appendChild(wrap);
+        const form = wrap.querySelector('#login-form');
+        const err = wrap.querySelector('#lg-err');
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            err.textContent = '';
+            const u = wrap.querySelector('#lg-user').value.trim();
+            const p = wrap.querySelector('#lg-pass').value;
+            const btn = wrap.querySelector('#lg-btn');
+            btn.disabled = true;
+            try {
+                if (needsSetup) {
+                    const p2 = wrap.querySelector('#lg-pass2').value;
+                    if (p !== p2) throw new Error('كلمتا السر غير متطابقتين');
+                    if (p.length < 6) throw new Error('كلمة السر لازم تكون 6 حروف على الأقل');
+                    await database.rpc('az_setup_owner', { p_username: u, p_password: p, p_name: (wrap.querySelector('#lg-name').value || u) }, { retry: false });
+                }
+                await database.signIn(u, p);
+                wrap.remove();
+                resolve(database.me);
+            } catch (ex) {
+                const m = ex && ex.code === 'bad_username' ? 'اسم المستخدم: حروف إنجليزي وأرقام فقط (3 حروف على الأقل)' : (ex.message || 'حصل خطأ');
+                err.textContent = m;
+                btn.disabled = false;
+            }
+        });
+        wrap.querySelector('#lg-user').focus();
+    });
+};
+
+function renderPriceChangesCard(invoices) {
+    const rows = [];
+    (invoices || []).forEach(inv => {
+        (inv.items || []).forEach(it => {
+            if (it.originalPrice == null) return;
+            const diff = round2((Number(it.salePrice) || 0) - (Number(it.originalPrice) || 0));
+            if (Math.abs(diff) < 0.005 && !it.belowCost) return;
+            rows.push({ inv, it, diff });
+        });
+    });
+    rows.sort((a, b) => String(b.inv.date).localeCompare(String(a.inv.date)));
+    const body = rows.length === 0
+        ? '<tr><td colspan="8" style="text-align:center">لا توجد تعديلات أسعار هذا الشهر</td></tr>'
+        : rows.slice(0, 100).map(({ inv, it, diff }) => `
+            <tr>
+                <td>#${inv.id}</td>
+                <td>${inv.date ? new Date(inv.date).toLocaleDateString('ar-EG') : '-'}</td>
+                <td>${esc(inv.createdByName || '-')}</td>
+                <td>${esc(inv.customer?.name || 'نقدي')}</td>
+                <td>${esc(it.name)}</td>
+                <td>${(Number(it.originalPrice) || 0).toFixed(2)}</td>
+                <td>${(Number(it.salePrice) || 0).toFixed(2)}</td>
+                <td style="color:${diff < 0 ? 'var(--danger)' : 'var(--success, #2ecc71)'}">${diff > 0 ? '+' : ''}${diff.toFixed(2)}${it.belowCost ? ' <b title="أقل من التكلفة">⚠ أقل من التكلفة</b>' : ''}</td>
+            </tr>`).join('');
+    return `
+        <div class="card reports-table-card" style="margin-top: 2rem">
+            <h3 style="margin-bottom: 1rem">تعديلات الأسعار على الفواتير (هذا الشهر)</h3>
+            <table class="modern-table">
+                <thead><tr><th>الفاتورة</th><th>التاريخ</th><th>البياع</th><th>العميل</th><th>الصنف</th><th>السعر الأصلي</th><th>سعر البيع</th><th>الفرق</th></tr></thead>
+                <tbody>${body}</tbody>
+            </table>
+        </div>`;
+}
+
+async function renderMyInvoices() {
+    const since = new Date(Date.now() - 7 * 86400000).toLocaleDateString('en-CA');
+    const to = new Date().toLocaleDateString('en-CA');
+    const all = (await db.getByDateRange('invoices', since, to)) || [];
+    const mine = all.filter(inv => !state.user.username || inv.createdBy === state.user.username).reverse();
+    contentArea.innerHTML = `
+        <div class="page-header"><h2>فواتيري (آخر 7 أيام)</h2></div>
+        <div class="card reports-table-card">
+            <table class="modern-table">
+                <thead><tr><th>رقم</th><th>التاريخ</th><th>العميل</th><th>الإجمالي</th><th>المدفوع</th><th>المتبقي</th><th>إجراء</th></tr></thead>
+                <tbody>${renderInvoiceReportRows(mine)}</tbody>
+            </table>
+        </div>`;
+}
+
+function azLoadUsers() { return db.rpc('az_list_users', {}); }
+
+async function renderUsersCard() {
+    const box = document.getElementById('users-card-body');
+    if (!box) return;
+    try {
+        const users = await azLoadUsers();
+        box.innerHTML = `
+            <table class="modern-table">
+                <thead><tr><th>الاسم</th><th>اسم المستخدم</th><th>الدور</th><th>الحالة</th><th>إجراء</th></tr></thead>
+                <tbody>${users.map(u => `
+                    <tr>
+                        <td>${esc(u.name)}</td><td dir="ltr">${esc(u.username)}</td>
+                        <td>${u.role === 'owner' ? 'مدير' : 'بياع'}</td>
+                        <td>${u.active ? 'شغال' : 'موقوف'}</td>
+                        <td>
+                            <button class="btn-edit" onclick="azChangePassword('${esc(u.username)}')">تغيير كلمة السر</button>
+                            ${u.role !== 'owner' ? `<button class="btn-delete" onclick="azToggleUser('${esc(u.username)}', ${u.active ? 'false' : 'true'})">${u.active ? 'إيقاف' : 'تشغيل'}</button>` : ''}
+                        </td>
+                    </tr>`).join('')}</tbody>
+            </table>
+            <h4 style="margin:1rem 0 .5rem">إضافة بياع</h4>
+            <div class="form-grid">
+                <div class="input-group"><label>الاسم</label><input id="nu-name" type="text"></div>
+                <div class="input-group"><label>اسم المستخدم (إنجليزي)</label><input id="nu-user" type="text" dir="ltr" autocapitalize="none"></div>
+                <div class="input-group"><label>كلمة السر (6 حروف على الأقل)</label><input id="nu-pass" type="text" dir="ltr" autocomplete="off"></div>
+                <button class="btn btn-save" style="margin-top:20px" onclick="azAddSeller()">إضافة البياع</button>
+            </div>`;
+    } catch (e) {
+        box.innerHTML = '<p>تعذر تحميل المستخدمين: ' + esc(e.message) + '</p>';
+    }
+}
+
+async function azAddSeller() {
+    const name = document.getElementById('nu-name').value.trim();
+    const user = document.getElementById('nu-user').value.trim();
+    const pass = document.getElementById('nu-pass').value;
+    if (!name || !user || pass.length < 6) return showToast('اكتب الاسم واسم المستخدم وكلمة سر 6 حروف على الأقل', 'error');
+    try {
+        // each seller is also a representative (مندوب) so his invoices show in the settlement screen
+        const agentId = await db.add('agents', { name, phone: '', notes: 'حساب بياع: ' + user });
+        await db.rpc('az_create_user', { p_username: user, p_password: pass, p_name: name, p_agent: agentId }, { retry: false });
+        await refreshGlobalCache('agents');
+        showToast('تمت إضافة البياع');
+        renderUsersCard();
+    } catch (e) {
+        const msg = e.code === 'username_taken' ? 'اسم المستخدم مستخدم قبل كده' : e.code === 'bad_username' ? 'اسم المستخدم: حروف إنجليزي وأرقام فقط' : e.message;
+        showToast(msg, 'error');
+    }
+}
+
+async function azChangePassword(username) {
+    const pass = prompt('كلمة السر الجديدة لـ ' + username + ' (6 حروف على الأقل):');
+    if (!pass) return;
+    try { await db.rpc('az_set_password', { p_username: username, p_password: pass }, { retry: false }); showToast('تم تغيير كلمة السر'); }
+    catch (e) { showToast(e.code === 'weak_password' ? 'كلمة السر قصيرة' : e.message, 'error'); }
+}
+
+async function azToggleUser(username, active) {
+    try { await db.rpc('az_set_active', { p_username: username, p_active: active }, { retry: false }); renderUsersCard(); }
+    catch (e) { showToast(e.message, 'error'); }
+}

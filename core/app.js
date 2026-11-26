@@ -3,6 +3,37 @@ function esc(v) {
     return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 // Round money to 2 decimals (avoids 0.8999999999999999 style values)
+// Debt an invoice created for the customer by itself:
+// invoice total minus the older balance it carried (prevBalance), plus anything later returned
+// (returns shrink inv.total, and are listed as their own credit lines).
+function invoiceOwnDebit(inv, allReturns) {
+    const returned = (allReturns || [])
+        .filter(r => r.invoiceId == inv.id)
+        .reduce((s, r) => s + (Number(r.total) || 0), 0);
+    return Math.max(0, round2((Number(inv.total) || 0) + returned - (Number(inv.prevBalance) || 0)));
+}
+
+// Sales value of an invoice = what was sold, WITHOUT the customer's older balance (prevBalance)
+function invSales(inv) {
+    return Math.max(0, round2((Number(inv?.total) || 0) - (Number(inv?.prevBalance) || 0)));
+}
+// Debt created by this invoice alone (remaining minus the older balance it carried)
+function invOwnRemaining(inv) {
+    return Math.max(0, round2((Number(inv?.remaining) || 0) - (Number(inv?.prevBalance) || 0)));
+}
+// Invoices store UTC ISO dates; all day/month grouping must use the local day (Egypt is UTC+2/+3)
+function invDate(inv) {
+    if (!inv || !inv.date) return '';
+    const d = new Date(inv.date);
+    return isNaN(d) ? String(inv.date).slice(0, 10) : d.toLocaleDateString('en-CA');
+}
+// Profit of an invoice: item margins minus the discount given
+function invProfit(inv) {
+    const items = Array.isArray(inv?.items) ? inv.items : [];
+    const margin = items.reduce((s, it) => s + ((Number(it.salePrice) || 0) - (Number(it.purchasePrice) || 0)) * (Number(it.qty) || 0), 0);
+    return round2(margin - (Number(inv?.discount) || 0));
+}
+
 function round2(n) {
     return Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 }
@@ -343,32 +374,28 @@ async function renderDashboard() {
     const monthPrefix = today.substring(0, 7); 
     const startDate = monthPrefix + '-01';
     const endDate = monthPrefix + '-31';
+    // Invoice dates are stored in UTC, so widen the fetch by a day and filter by local day below
+    const prevDay = new Date(new Date(startDate + 'T12:00:00').getTime() - 86400000).toLocaleDateString('en-CA');
 
     // Fetch only necessary data for the month
-    const [invoices, expenses, dayClosures] = await Promise.all([
-        db.getByDateRange('invoices', startDate, endDate),
+    const [invoicesRaw, expenses, dayClosures] = await Promise.all([
+        db.getByDateRange('invoices', prevDay, endDate),
         db.getByDateRange('expenses', startDate, endDate),
         db.getByDateRange('dayClosures', startDate, endDate)
     ]);
+    const invoices = (invoicesRaw || []).filter(inv => invDate(inv).startsWith(monthPrefix));
     
     // Stats Calculations
     const isClosedToday = (dayClosures || []).some(c => c?.date === today);
-    const invoicesToday = isClosedToday ? [] : (invoices || []).filter(inv => inv?.date && inv.date.startsWith(today));
-    const salesToday = isClosedToday ? 0 : invoicesToday.reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const invoicesToday = isClosedToday ? [] : (invoices || []).filter(inv => invDate(inv) === today);
+    const salesToday = isClosedToday ? 0 : invoicesToday.reduce((sum, inv) => sum + invSales(inv), 0);
     
-    const salesMonth = (invoices || []).reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const salesMonth = (invoices || []).reduce((sum, inv) => sum + invSales(inv), 0);
     const totalExpenses = (expenses || []).reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0);
     
     // Profit Calc Optimization: reduce redundant calculations
     let actualProfit = 0;
-    (invoices || []).forEach(inv => {
-        if (inv && inv.items) {
-            inv.items.forEach(item => {
-                const margin = ((Number(item.salePrice) || 0) - (Number(item.purchasePrice) || 0)) * (Number(item.qty) || 0);
-                actualProfit += margin;
-            });
-        }
-    });
+    (invoices || []).forEach(inv => { actualProfit += invProfit(inv); });
     actualProfit -= totalExpenses;
     
     const lowStock = products.filter(p => p.stock <= p.minStock);
@@ -459,7 +486,7 @@ function initDashboardCharts(data = []) {
     data.forEach(inv => {
         if (inv && inv.date) {
             const d = new Date(inv.date).getDate();
-            dailyData[d] = (dailyData[d] || 0) + (Number(inv.total) || 0);
+            dailyData[d] = (dailyData[d] || 0) + invSales(inv);
         }
     });
 
@@ -908,7 +935,7 @@ function renderProductRows(products) {
             <td>${esc(p.name)}</td>
             <td>${p.purchasePrice}</td>
             <td>${p.salePrice}</td>
-            <td>${p.unit || 'قطعة'} (${p.piecesPerBox || 1})</td>
+            <td>${esc(p.unit || 'قطعة')} (${p.piecesPerBox || 1})</td>
             <td>${p.stock}</td>
             <td>${p.minStock}</td>
             <td>
@@ -967,29 +994,42 @@ function closeModal(id) {
 async function saveProduct(e) {
     e.preventDefault();
     const id = document.getElementById('prod-id').value;
+    const num = (elId, fallback = 0) => {
+        const v = parseFloat(document.getElementById(elId).value);
+        return Number.isFinite(v) ? v : fallback;
+    };
     const p = {
-        name: document.getElementById('prod-name').value,
-        barcode: document.getElementById('prod-barcode').value,
-        purchasePrice: parseFloat(document.getElementById('prod-purchase').value),
-        salePrice: parseFloat(document.getElementById('prod-sale').value),
-        stock: parseInt(document.getElementById('prod-stock').value),
+        name: document.getElementById('prod-name').value.trim(),
+        barcode: document.getElementById('prod-barcode').value.trim(),
+        purchasePrice: Math.max(0, num('prod-purchase')),
+        salePrice: num('prod-sale'),
+        stock: Math.trunc(num('prod-stock')),
         unit: document.getElementById('prod-unit').value,
-        piecesPerBox: parseInt(document.getElementById('prod-pieces-per-box').value) || 1,
-        minStock: parseInt(document.getElementById('prod-min').value)
+        piecesPerBox: Math.max(1, Math.trunc(num('prod-pieces-per-box', 1)) || 1),
+        minStock: Math.max(0, Math.trunc(num('prod-min')))
     };
 
     if (!p.name) return showToast('ادخل اسم المنتج', 'error');
-    if (!p.salePrice) return showToast('ادخل سعر البيع', 'error');
+    if (!p.salePrice || p.salePrice < 0) return showToast('ادخل سعر البيع', 'error');
+
+    // Barcodes must be unique (the cashier finds products by barcode)
+    if (p.barcode) {
+        const all = await db.getAll('products');
+        const dup = all.find(x => x.barcode === p.barcode && String(x.id) !== String(id));
+        if (dup) return showToast('الباركود ده مستخدم في منتج تاني: ' + dup.name, 'error');
+    }
 
     if (id) {
         p.id = parseInt(id);
-        await db.update('products', p);
+        // Keep fields the form does not edit (category etc.)
+        const old = await db.getById('products', p.id);
+        await db.update('products', { ...(old || {}), ...p });
         showToast('تم تعديل المنتج');
     } else {
-        await db.add('products', p);
+        const newId = await db.add('products', p);
         // Log initial stock
         await db.add('inventoryLog', {
-            productId: p.id || p.barcode, 
+            productId: newId,
             date: new Date().toISOString(),
             qty: p.stock,
             type: 'initial',
@@ -1582,7 +1622,7 @@ function renderInventoryLogs(logs, products) {
                 <td>${esc(product ? product.name : 'منتج محذوف')}</td>
                 <td class="${typeClass}">${log.qty > 0 ? '+' : ''}${log.qty}</td>
                 <td>${typeLabel}</td>
-                <td>${log.ref || '-'}</td>
+                <td>${esc(log.ref || '-')}</td>
             </tr>
         `;
     }).join('');
@@ -1597,10 +1637,11 @@ async function saveStockEntry(e) {
     const prodId = parseInt(document.getElementById('stock-prod-id').value);
     const qty = parseInt(document.getElementById('stock-qty').value);
     const ref = document.getElementById('stock-ref').value;
+    if (!Number.isFinite(qty) || qty === 0) return showToast('أدخل كمية صحيحة', 'error');
     
     const p = await db.getById('products', prodId);
     if (p) {
-        p.stock += qty;
+        p.stock = (Number(p.stock) || 0) + qty;
         await db.update('products', p);
         
         await db.add('inventoryLog', {
@@ -1724,7 +1765,7 @@ async function saveAgent(e) {
         name: document.getElementById('agent-name').value,
         phone: document.getElementById('agent-phone').value,
         address: document.getElementById('agent-address').value,
-        commission: parseFloat(document.getElementById('agent-commission').value)
+        commission: parseFloat(document.getElementById('agent-commission').value) || 0
     };
 
     if (id) {
@@ -1840,6 +1881,7 @@ async function saveExpense(e) {
         amount: parseFloat(document.getElementById('exp-amount').value),
         note: document.getElementById('exp-note').value
     };
+    if (!Number.isFinite(expense.amount) || expense.amount <= 0) return showToast('أدخل مبلغ مصروف صحيح', 'error');
     await db.add('expenses', expense);
     closeModal('expense-modal');
     renderExpenses();
@@ -1862,14 +1904,16 @@ async function renderReports() {
     const startDate = monthPrefix + '-01';
     const endDate = monthPrefix + '-31';
 
-    const invoices = (await db.getByDateRange('invoices', startDate, endDate)) || [];
+    const prevDay = new Date(new Date(startDate + 'T12:00:00').getTime() - 86400000).toLocaleDateString('en-CA');
+    const invoices = ((await db.getByDateRange('invoices', prevDay, endDate)) || []).filter(inv => invDate(inv).startsWith(monthPrefix));
     const expenses = (await db.getByDateRange('expenses', startDate, endDate)) || [];
     const payments = (await db.getByDateRange('customerPayments', startDate, endDate)) || [];
     const customers = await db.getAll('customers');
     
-    const totalSales = invoices.reduce((sum, inv) => sum + (Number(inv?.total) || 0), 0);
+    const totalSales = invoices.reduce((sum, inv) => sum + invSales(inv), 0);
     const totalExpenses = expenses.reduce((sum, exp) => sum + (Number(exp?.amount) || 0), 0);
-    const netProfit = totalSales - totalExpenses;
+    // Real profit: item margins (sale price minus purchase price) minus discounts, minus expenses
+    const netProfit = invoices.reduce((sum, inv) => sum + invProfit(inv), 0) - totalExpenses;
     
     contentArea.innerHTML = `
         <div class="page-header">
@@ -2048,7 +2092,7 @@ async function filterInvoicesInReports() {
         filtered = all.filter(inv => {
             const matchesId = inv.id.toString() === query;
             const matchesName = (inv.customer?.name || inv.customerName || '').toLowerCase().includes(query);
-            const matchesDate = !dateQuery || inv.date.startsWith(dateQuery);
+            const matchesDate = !dateQuery || invDate(inv) === dateQuery;
             const matchesQuery = !query || matchesId || matchesName;
             
             return matchesQuery && matchesDate;
@@ -2636,7 +2680,7 @@ async function exportData() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `AbuZamel_Backup_${new Date().toLocaleDateString()}.json`;
+    a.download = `AbuZamel_Backup_${new Date().toLocaleDateString('en-CA')}.json`;
     a.click();
 }
 
@@ -2648,6 +2692,15 @@ async function importData(event) {
     reader.onload = async (e) => {
         try {
             const data = JSON.parse(e.target.result);
+            // Validate BEFORE deleting anything: a wrong file must never wipe the current data
+            const knownStores = ['products', 'customers', 'suppliers', 'purchases', 'audits', 'dayClosures', 'agents', 'invoices', 'expenses', 'inventoryLog', 'settlements', 'returns', 'users', 'customerPayments', 'supplierPayments'];
+            const looksLikeBackup = data && typeof data === 'object' && !Array.isArray(data) &&
+                knownStores.some(k => Array.isArray(data[k])) &&
+                knownStores.every(k => data[k] === undefined || Array.isArray(data[k]));
+            if (!looksLikeBackup) {
+                alert('الملف ده مش نسخة احتياطية صالحة للنظام. محدش اتمسح.');
+                return;
+            }
             if (confirm('سيتم حذف البيانات الحالية واستبدالها بالنسخة الاحتياطية. هل أنت متأكد؟')) {
                 // Clear and rebuild (IndexedDB)
                 await db.clearAllStores();
@@ -2849,7 +2902,7 @@ async function renderSuppliers() {
                                   <tr>
                                     <td>#${p.id}</td>
                                     <td>${p.date ? new Date(p.date).toLocaleDateString('ar-EG') : '-'}</td>
-                                    <td>${s ? s.name : `مورد #${p.supplierId}`}</td>
+                                    <td>${s ? esc(s.name) : `مورد #${p.supplierId}`}</td>
                                     <td>${Array.isArray(p.items) ? p.items.length : 0}</td>
                                     <td style="font-weight:900;">${(Number(p.totalCost)||0).toFixed(2)}</td>
                                   </tr>
@@ -3044,7 +3097,7 @@ async function supSavePurchase() {
     if (!supplierId) return alert('اختر المورد');
     const date = document.getElementById('sup-purchase-date')?.value || new Date().toLocaleDateString('en-CA');
     const note = document.getElementById('sup-purchase-note')?.value || '';
-    const totalCost = st.items.reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const totalCost = round2(st.items.reduce((s, x) => s + (Number(x.total) || 0), 0));
     const paidAmount = parseFloat(document.getElementById('sup-paid')?.value) || 0;
     const remainingAmount = totalCost - paidAmount;
 
@@ -3320,7 +3373,7 @@ async function savePurchase() {
     const date = document.getElementById('purchase-date').value || new Date().toLocaleDateString('en-CA');
     const note = document.getElementById('purchase-note').value || '';
     const paid = parseFloat(document.getElementById('purchase-paid')?.value) || 0;
-    const totalCost = st.items.reduce((s, x) => s + (Number(x.total) || 0), 0);
+    const totalCost = round2(st.items.reduce((s, x) => s + (Number(x.total) || 0), 0));
 
     const purchase = {
         date: new Date(date).toISOString(),
@@ -3359,7 +3412,7 @@ async function savePurchase() {
     if (supplierId) {
         const supplier = await db.getById('suppliers', supplierId);
         if (supplier) {
-            const remaining = totalCost - paid;
+            const remaining = round2(totalCost - paid);
             supplier.balance = round2((Number(supplier.balance) || 0) + Math.max(0, remaining));
             await db.update('suppliers', supplier);
         }
@@ -3442,7 +3495,9 @@ async function saveAudit(applyAdjustments) {
 
     for (const p of (products || [])) {
         const sys = Number(p.stock) || 0;
-        const counted = Number(document.getElementById(`audit-count-${p.id}`)?.value) || 0;
+        // An empty box means "not counted": keep the system quantity instead of zeroing the stock
+        const rawCount = document.getElementById(`audit-count-${p.id}`)?.value;
+        const counted = (rawCount === undefined || rawCount === null || String(rawCount).trim() === '') ? sys : (Number(rawCount) || 0);
         const diff = counted - sys;
         entries.push({ productId: p.id, name: p.name, barcode: p.barcode, system: sys, counted, diff });
     }
@@ -3555,7 +3610,7 @@ async function closeDay() {
 }
 
 function sumPaidForAgent(invoices, agentId, date) {
-    const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && inv?.date && inv.date.startsWith(date));
+    const dayInvoices = (invoices || []).filter(inv => inv?.agentId == agentId && invDate(inv) === date);
     return round2(dayInvoices.reduce((sum, inv) => sum + (Number(inv?.paid) || 0), 0));
 }
 
@@ -3661,10 +3716,10 @@ async function saveAgentSettlement() {
 // sumPaidForAgent defined above (L3559)
 
 function renderSettlementStats(agents, invoices, date) {
-    const todayInvoices = invoices.filter(inv => inv.date && inv.date.startsWith(date));
-    const totalSales = todayInvoices.reduce((sum, inv) => sum + (Number(inv.total) || 0), 0);
+    const todayInvoices = invoices.filter(inv => invDate(inv) === date);
+    const totalSales = todayInvoices.reduce((sum, inv) => sum + invSales(inv), 0);
     const totalPaid = todayInvoices.reduce((sum, inv) => sum + (Number(inv.paid) || 0), 0);
-    const totalRemaining = todayInvoices.reduce((sum, inv) => sum + (Number(inv.remaining) || 0), 0);
+    const totalRemaining = todayInvoices.reduce((sum, inv) => sum + invOwnRemaining(inv), 0);
 
     return `
         <div class="stats-grid" style="margin-bottom: 2rem;">
@@ -3676,7 +3731,7 @@ function renderSettlementStats(agents, invoices, date) {
 }
 
 function renderSettlementRows(agents, invoices, date) {
-    const todayInvoices = invoices.filter(inv => inv.date && inv.date.startsWith(date));
+    const todayInvoices = invoices.filter(inv => invDate(inv) === date);
     
     const agentSales = {};
     agents.forEach(a => agentSales[a.id] = { name: a.name, total: 0, paid: 0 });
@@ -3684,7 +3739,7 @@ function renderSettlementRows(agents, invoices, date) {
     todayInvoices.forEach(inv => {
         const id = inv.agentId;
         if(agentSales[id]) {
-            agentSales[id].total += (Number(inv.total) || 0);
+            agentSales[id].total += invSales(inv);
             agentSales[id].paid += (Number(inv.paid) || 0);
         }
     });
@@ -3767,7 +3822,7 @@ async function refreshSettlementHistory(date) {
                     return `
                         <tr>
                             <td>${r.createdAt ? new Date(r.createdAt).toLocaleTimeString('ar-EG', {hour: '2-digit', minute:'2-digit'}) : '-'}</td>
-                            <td>${agentName(r.agentId)}</td>
+                            <td>${esc(agentName(r.agentId))}</td>
                             <td>${fmt2(r.expected)}</td>
                             <td>${fmt2(r.actual)}</td>
                             <td dir="ltr" class="${diff < 0 ? 'text-danger' : diff > 0 ? 'text-success' : 'text-primary'}">${fmt2(diff)}</td>
@@ -3790,7 +3845,7 @@ async function printThermalInvoice(inv, id) {
     const itemsHtml = inv.items.map((item, idx) => `
         <tr class="item-row">
             <td class="item-name">${esc(item.name)}</td>
-            <td class="item-unit">${item.selectedUnit || 'قطعة'}</td>
+            <td class="item-unit">${esc(item.selectedUnit || 'قطعة')}</td>
             <td class="item-price">${Number(item.salePrice).toFixed(2)}</td>
             <td class="item-qty">${item.qty}</td>
             <td class="item-total">${(Number(item.salePrice) * Number(item.qty)).toFixed(2)}</td>
@@ -3888,7 +3943,7 @@ async function printThermalInvoice(inv, id) {
             </div>
 
             <div class="top-line" style="margin-top: 8px; border-top-width: 2.2px;"></div>
-            <div class="agent-row" style="margin-top: 4px;">المندوب: ${agentName}</div>
+            <div class="agent-row" style="margin-top: 4px;">المندوب: ${esc(agentName)}</div>
             <div class="meta-dashed" style="border-bottom: 0; margin-top: 4px; padding: 2px 0;"></div>
             
             <div class="thanks-msg" style="margin-top: 4px;">شكراً لتعاملكم معنا</div>
@@ -3969,7 +4024,7 @@ async function printPaymentReceipt(payment) {
     executeHiddenPrint(`
         <html>
         <head>
-            <title>وصل استلام - ${payment.customerName}</title>
+            <title>وصل استلام - ${esc(payment.customerName)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
                 @page { margin: 0; }
@@ -4004,7 +4059,7 @@ async function printPaymentReceipt(payment) {
                 <div class="details">
                     <div class="row"><span>رقم الوصل:</span><span>#${payment.id}</span></div>
                     <div class="row"><span>التاريخ:</span><span>${new Date(payment.date).toLocaleDateString('ar-EG')}</span></div>
-                    <div class="row"><span>العميل:</span><span>${payment.customerName}</span></div>
+                    <div class="row"><span>العميل:</span><span>${esc(payment.customerName)}</span></div>
                 </div>
                 <div class="amount-box">
                     المبلغ: ${payment.amount.toFixed(2)} ج.م
@@ -4067,8 +4122,8 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
             date: inv.date,
             type: 'فاتورة مبيعات',
             id: inv.id,
-            debit: Number(inv.total) || 0,
-            credit: 0,
+            debit: invoiceOwnDebit(inv, returns),
+            credit: Number(inv.paid) || 0,
             ref: `فاتورة #${inv.id}`,
             originalType: 'invoice'
         })),
@@ -4076,6 +4131,7 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
             const isOut = p.direction === 'out'; // New field logic
             return {
                 date: p.date,
+                sk: p.createdAt,
                 type: isOut ? 'نقد صادر (له)' : 'نقد وارد (عليه)',
                 id: p.id,
                 debit: isOut ? (Number(p.amount) || 0) : 0,
@@ -4094,7 +4150,7 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
             ref: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`,
             originalType: 'return'
         }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     // Calculate running balance starting from BEFORE the filtered period if filters are active
     let runningBalance = customer.initialBalance || 0;
@@ -4195,14 +4251,14 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                         <tr class="${m.originalType}-row">
                             <td>${new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })}</td>
                             <td>
-                                <span class="badge-type ${m.originalType}">${m.type}</span>
+                                <span class="badge-type ${m.originalType}">${esc(m.type)}</span>
                             </td>
                             <td class="text-danger font-bold">${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td class="text-success font-bold">${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
                             <td style="font-weight:900; color: var(--primary); background: rgba(var(--primary-rgb), 0.05);">${m.running.toFixed(2)}</td>
                             <td>
                                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span>${m.ref}</span>
+                                    <span>${esc(m.ref)}</span>
                                     <div class="row-actions">
                                         ${m.originalType === 'payment' ? `
                                             <button class="btn-icon edit" title="تعديل" onclick="editPayment('customer', ${m.id})"><i class="fas fa-edit"></i></button>
@@ -4210,7 +4266,7 @@ async function showCustomerLedger(customerId, startDate = null, endDate = null) 
                                         ` : ''}
                                         ${m.originalType === 'invoice' ? `
                                             <button class="btn-icon view" title="تعديل الفاتورة" onclick="editInvoice(${m.id})"><i class="fas fa-pen"></i></button>
-                                            <button class="btn-icon print" title="طباعة" onclick="printInvoice(${m.id})"><i class="fas fa-print"></i></button>
+                                            <button class="btn-icon print" title="طباعة" onclick="reprintInvoice(${m.id})"><i class="fas fa-print"></i></button>
                                         ` : ''}
                                     </div>
                                 </div>
@@ -4282,7 +4338,7 @@ function showPaymentModal(type, entityId, editingPayment = null, forceDirection 
                 </div>
                 <div>
                     <label style="color: var(--text-muted, #aaa); display:block; margin-bottom:6px; font-size:0.9rem;">ملاحظات / البيان</label>
-                    <input type="text" id="pay-note" value="${note}" placeholder="مثلاً: سداد نقدي، دفعة تحت الحساب..." style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--border-dark,#1e2d4d); background:var(--bg-dark,#050a1f); color:#fff; font-size:1rem; box-sizing:border-box;">
+                    <input type="text" id="pay-note" value="${esc(note)}" placeholder="مثلاً: سداد نقدي، دفعة تحت الحساب..." style="width:100%; padding:12px; border-radius:8px; border:1px solid var(--border-dark,#1e2d4d); background:var(--bg-dark,#050a1f); color:#fff; font-size:1rem; box-sizing:border-box;">
                 </div>
             </div>
             <div style="display:flex; gap:1rem; margin-top:1.5rem; justify-content:flex-end;">
@@ -4360,7 +4416,7 @@ async function recalculateCustomerBalance(customerId) {
         let credit = 0;
 
         custInvoices.forEach(inv => {
-            debit += (Number(inv.total) || 0);
+            debit += invoiceOwnDebit(inv, returns);
             credit += (Number(inv.paid) || 0);
         });
 
@@ -4373,7 +4429,7 @@ async function recalculateCustomerBalance(customerId) {
             credit += (Number(r.total) || 0);
         });
 
-        const newBalance = Math.max(0, debit - credit);
+        const newBalance = Math.max(0, round2(debit - credit));
         customer.balance = newBalance;
         await db.update('customers', customer);
         
@@ -4404,6 +4460,7 @@ async function recalculateSupplierBalance(supplierId) {
         supPurchases.forEach(p => {
             const total = p.totalCost !== undefined ? p.totalCost : (p.total || 0);
             credit += Number(total);
+            debit += Number(p.paid) || 0; // paid at purchase time
         });
 
         supPayments.forEach(p => {
@@ -4411,7 +4468,7 @@ async function recalculateSupplierBalance(supplierId) {
             else debit += Number(p.amount);
         });
 
-        const newBalance = Math.max(0, credit - debit);
+        const newBalance = Math.max(0, round2(credit - debit));
         supplier.balance = newBalance;
         await db.update('suppliers', supplier);
         
@@ -4544,7 +4601,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             date: p.date,
             type: 'فاتورة شراء',
             id: p.id,
-            debit: 0,
+            debit: Number(p.paid) || 0,
             credit: Number(p.totalCost !== undefined ? p.totalCost : (p.total || 0)),
             ref: `فاتورة #${p.id}`,
             originalType: 'purchase'
@@ -4553,6 +4610,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
             const isIn = p.direction === 'in';
             return {
                 date: p.date,
+                sk: p.createdAt,
                 type: isIn ? 'نقد وارد (من المورد)' : 'نقد صادر (للمورد)',
                 id: p.id,
                 debit: isIn ? 0 : Number(p.amount),
@@ -4562,7 +4620,7 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
                 direction: p.direction || 'out'
             };
         })
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     // Calculate running balance
     let runningBalance = supplier.initialBalance || 0;
@@ -4654,13 +4712,13 @@ async function showSupplierLedger(supplierId, startDate = null, endDate = null) 
                     ${movements.map(m => `
                         <tr>
                             <td>${new Date(m.date).toLocaleDateString('ar-EG', { year:'numeric', month:'short', day:'numeric' })}</td>
-                            <td><span class="badge-type ${m.originalType}">${m.type}</span></td>
+                            <td><span class="badge-type ${m.originalType}">${esc(m.type)}</span></td>
                             <td class="text-danger font-bold">${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td class="text-success font-bold">${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
                             <td style="font-weight:900; color: var(--primary); background: rgba(var(--primary-rgb), 0.05);">${m.running.toFixed(2)}</td>
                             <td>
                                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span>${m.ref}</span>
+                                    <span>${esc(m.ref)}</span>
                                     <div class="row-actions">
                                         ${m.type.includes('نقد') ? `
                                             <button class="btn-icon edit" title="تعديل" onclick="editPayment('supplier', ${m.id})"><i class="fas fa-edit"></i></button>
@@ -4682,7 +4740,7 @@ async function printSupplierPaymentReceipt(payment) {
     executeHiddenPrint(`
         <html>
         <head>
-            <title>وصل دفع للمورد - ${payment.supplierName}</title>
+            <title>وصل دفع للمورد - ${esc(payment.supplierName)}</title>
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;900&display=swap');
                 @page { margin: 0; }
@@ -4717,7 +4775,7 @@ async function printSupplierPaymentReceipt(payment) {
                 <div class="details">
                     <div class="row"><span>رقم الوصل:</span><span>#${payment.id}</span></div>
                     <div class="row"><span>التاريخ:</span><span>${new Date(payment.date).toLocaleDateString('ar-EG')}</span></div>
-                    <div class="row"><span>المورد:</span><span>${payment.supplierName}</span></div>
+                    <div class="row"><span>المورد:</span><span>${esc(payment.supplierName)}</span></div>
                 </div>
                 <div class="amount-box">المبلغ المدفوع: ${payment.amount.toFixed(2)} ج.م</div>
                 <div class="details">
@@ -4743,11 +4801,16 @@ async function printCustomerStatement(customerId) {
     const payments = await db.getAll('customerPayments');
     const custInvoices = invoices.filter(inv => inv.customer?.id == customerId);
     const custPayments = payments.filter(p => p.customerId == customerId);
+    const allReturns = await db.getAll('returns');
+    const custReturns = allReturns.filter(r => r.customerId == customerId);
 
     const movements = [
-        ...custInvoices.map(inv => ({ date: inv.date, desc: `فاتورة #${inv.id}`, debit: inv.total, credit: 0 })),
-        ...custPayments.map(p => ({ date: p.date, desc: p.note || 'دفعة سداد', debit: 0, credit: p.amount }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+        ...custInvoices.map(inv => ({ date: inv.date, desc: `فاتورة #${inv.id}`, debit: invoiceOwnDebit(inv, allReturns), credit: Number(inv.paid) || 0 })),
+        ...custPayments.map(p => p.direction === 'out'
+            ? ({ date: p.date, desc: p.note || 'نقد صادر', debit: Number(p.amount) || 0, credit: 0 })
+            : ({ date: p.date, desc: p.note || 'دفعة سداد', debit: 0, credit: Number(p.amount) || 0 })),
+        ...custReturns.map(r => ({ date: r.date, desc: `مرتجع #${r.id} (فاتورة #${r.invoiceId})`, debit: 0, credit: Number(r.total) || 0 }))
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     executeHiddenPrint(`
         <html>
@@ -4789,7 +4852,7 @@ async function printCustomerStatement(customerId) {
                     ${movements.map(m => `
                         <tr>
                             <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
-                            <td>${m.desc}</td>
+                            <td>${esc(m.desc)}</td>
                             <td>${m.debit > 0 ? m.debit.toFixed(2) : '-'}</td>
                             <td>${m.credit > 0 ? m.credit.toFixed(2) : '-'}</td>
                         </tr>
@@ -4812,9 +4875,9 @@ async function printSupplierStatement(supplierId) {
     const supPayments = payments.filter(p => p.supplierId == supplierId);
 
     const movements = [
-        ...supPurchases.map(p => ({ date: p.date, desc: `فاتورة شراء #${p.id}`, debit: 0, credit: p.totalCost !== undefined ? p.totalCost : (p.total || 0) })),
+        ...supPurchases.map(p => ({ date: p.date, desc: `فاتورة شراء #${p.id}`, debit: Number(p.paid) || 0, credit: p.totalCost !== undefined ? p.totalCost : (p.total || 0) })),
         ...supPayments.map(p => ({ date: p.date, desc: p.note || 'دفعة سداد', debit: p.amount, credit: 0 }))
-    ].sort((a, b) => new Date(a.date) - new Date(b.date));
+    ].sort((a, b) => new Date(a.sk || a.date) - new Date(b.sk || b.date));
 
     // Reliable iframe printing
     const iframe = document.createElement('iframe');
@@ -4867,7 +4930,7 @@ async function printSupplierStatement(supplierId) {
                     ${movements.map(m => `
                         <tr>
                             <td>${new Date(m.date).toLocaleDateString('ar-EG')}</td>
-                            <td>${m.desc}</td>
+                            <td>${esc(m.desc)}</td>
                             <td>${m.debit > 0 ? Number(m.debit).toFixed(2) : '-'}</td>
                             <td>${m.credit > 0 ? Number(m.credit).toFixed(2) : '-'}</td>
                         </tr>

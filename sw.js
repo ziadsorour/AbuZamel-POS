@@ -39,7 +39,9 @@ self.addEventListener('fetch', (event) => {
       if (cached) return cached;
       return fetch(req)
         .then((res) => {
-          if (!res || res.status !== 200) return res;
+          // Cross-origin CDN files (Chart.js, XLSX, jsPDF, fonts) come back as opaque responses (status 0).
+          // Cache them too so charts and Excel export keep working offline.
+          if (!res || (res.status !== 200 && res.type !== 'opaque')) return res;
           const copy = res.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(req, copy)).catch(() => {});
           return res;

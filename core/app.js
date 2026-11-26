@@ -2067,8 +2067,10 @@ async function voidInvoice(id) {
             if (customer) {
                 // inv.remaining includes the customer's older balance (prevBalance) that was
                 // already owed before this invoice. Only revert the debt this invoice created.
-                const debtToRevert = Math.max(0, (Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0));
-                customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - debtToRevert));
+                // The invoice moved the balance by (remaining, floored at 0) minus the older balance it
+                // carried. That can be negative when the customer paid down old debt, so undo the real delta.
+                const balanceDelta = Math.max(0, Number(inv.remaining) || 0) - (Number(inv.prevBalance) || 0);
+                customer.balance = round2(Math.max(0, (Number(customer.balance) || 0) - balanceDelta));
                 await db.update('customers', customer);
             }
         }

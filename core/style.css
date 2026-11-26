@@ -1596,3 +1596,61 @@ body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }
     .pos-sidebar { width: 100%; margin: 0; }
     .search-results-dropdown { max-height: 50vh; }
 }
+
+/* ===== Phone: smaller tiles and buttons, sleeker (v26) ===== */
+@media (max-width: 768px) {
+    #content-area { padding: 0.55rem 0.6rem; }
+    .page-header { margin-bottom: 0.6rem; gap: 0.45rem; }
+    .page-header h2 { font-size: 1.05rem; }
+    .page-header p { font-size: 0.78rem !important; }
+    .card { padding: 0.65rem; border-radius: 12px; }
+    /* buttons: small, in a row, not full-width stacks */
+    .btn { min-height: 36px; padding: 0.4rem 0.8rem; font-size: 0.82rem; border-radius: 10px; gap: 6px; }
+    .btn i { font-size: 0.8rem; }
+    .header-actions { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+    .header-actions .btn, .header-actions button { flex: 1 1 auto; min-width: 0; min-height: 34px; padding: 0.3rem 0.6rem; font-size: 0.78rem; }
+    .page-header > .btn, .page-header > button { min-height: 38px; font-size: 0.85rem; }
+    .page-header .btn { min-height: 38px; font-size: 0.85rem; }
+    .page-header .header-actions .btn, .page-header .header-actions button { width: auto !important; min-height: 34px; font-size: 0.78rem; box-shadow: none; padding: 0.3rem 0.6rem !important; margin: 0 !important; }
+    .table-actions { gap: 6px !important; }
+    .table-actions > * { flex: 1 1 100%; }
+    .table-actions .btn, .table-actions input, .table-actions select { min-height: 38px; height: 38px; }
+    /* inputs */
+    input, select, textarea { font-size: 16px; }
+    input:not([type=checkbox]):not([type=radio]), select { min-height: 38px; height: 40px; padding: 0 10px; border-radius: 10px; line-height: 1.2; }
+    .input-group select, .pos-customer-section select, select { height: 40px; padding-top: 0 !important; padding-bottom: 0 !important; line-height: 38px; }
+    .input-group label { font-size: 0.75rem; margin-bottom: 3px; }
+    .filters-card { padding: 0.6rem !important; margin-bottom: 0.7rem !important; }
+    .filters-card .filter-row { gap: 0.5rem !important; flex-wrap: wrap; }
+    .filters-card .filter-row .input-group { flex: 1 1 42%; }
+    .filters-card .btn { height: 36px !important; flex: 1 1 auto; }
+    /* stat tiles */
+    .stats-grid { gap: 0.4rem; margin-bottom: 0.7rem !important; }
+    .stat-card { padding: 0.5rem 0.6rem; gap: 0.4rem; border-radius: 12px; }
+    .stat-card .stat-icon { width: 28px; height: 28px; font-size: 0.8rem; border-radius: 8px; }
+    .stat-card .stat-title, .stat-card p { font-size: 0.7rem; line-height: 1.25; margin: 0; }
+    .stat-card h3, .stat-card .stat-value, .stat-card h2 { font-size: 0.98rem; line-height: 1.2; margin: 2px 0 0; }
+    .stat-details { min-width: 0; }
+    /* list rows and table cards */
+    table.az-stack tr { padding: 0.2rem 0.6rem; margin-bottom: 0.4rem; border-radius: 10px; }
+    table.az-stack td { padding: 0.25rem 0 !important; min-height: 26px; font-size: 0.82rem; gap: 0.5rem; }
+    table.az-stack td::before { font-size: 0.72rem; }
+    table.az-stack td .btn, table.az-stack td button { min-height: 30px; padding: 0.2rem 0.55rem; font-size: 0.75rem; }
+    .ledger-table td, .ledger-table th { padding: 0.4rem 0.35rem !important; font-size: 0.74rem; }
+    /* modals */
+    .modal-content, .modal-box { padding: 0.8rem !important; }
+    .modal-content h2, .modal-content h3 { font-size: 1rem; }
+    /* cashier */
+    .pos-billing-card { padding: 10px !important; gap: 10px; }
+    .pos-customer-section input, .pos-customer-section select, #pos-product-search { height: 40px; }
+    .pos-actions .btn { min-height: 40px; font-size: 0.82rem; }
+    .pos-summary-card { padding: 0.65rem; }
+    .pos-summary-card h3 { font-size: 0.95rem; }
+    /* bottom bar and top bar */
+    .top-bar { min-height: 44px; padding: 0.3rem 0.5rem; }
+    .bottom-nav { min-height: 52px; }
+    .bottom-nav a, .bottom-nav button, .bottom-nav .bn-item { font-size: 0.66rem; padding-top: 4px; padding-bottom: 4px; }
+    .bottom-nav i { font-size: 1.05rem; }
+    #az-night, .mobile-menu-btn { width: 36px; height: 36px; font-size: 0.95rem; }
+    .nav-item { padding: 0.5rem 1rem; font-size: 0.9rem; }
+}

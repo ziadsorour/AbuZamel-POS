@@ -1654,3 +1654,26 @@ body.role-seller [onclick*="showStockEntryModal"] { display: none !important; }
     #az-night, .mobile-menu-btn { width: 36px; height: 36px; font-size: 0.95rem; }
     .nav-item { padding: 0.5rem 1rem; font-size: 0.9rem; }
 }
+
+/* ===== Phone cashier: smaller (v27) ===== */
+@media (max-width: 768px) {
+    .pos-billing-card { padding: 8px !important; gap: 8px !important; }
+    .pos-customer-section { gap: 6px !important; }
+    .pos-customer-section label { font-size: 0.72rem !important; margin-bottom: 2px; }
+    .pos-customer-section input, .pos-customer-section select, #pos-product-search { height: 36px !important; font-size: 14px !important; padding-top: 0 !important; padding-bottom: 0 !important; border-radius: 10px !important; }
+    #pos-table th { font-size: 0.68rem !important; }
+    #pos-table th, #pos-table td { padding: 5px 2px !important; font-size: 0.72rem !important; }
+    #pos-table td.c-price input, #pos-table td.c-unit select, #pos-table .table-qty-input, .qty-step input { height: 32px !important; font-size: 12px !important; border-radius: 8px !important; }
+    #pos-table td.c-total { font-size: 0.74rem !important; }
+    #pos-table td.c-del .btn-delete { height: 30px; font-size: 0.8rem; }
+    .pos-summary-card { padding: 0.55rem !important; }
+    .pos-summary-card h3 { font-size: 0.85rem !important; margin: 0 0 4px; }
+    .pos-summary-card .summary-item { margin: 0.25rem 0 !important; padding: 2px 0 !important; font-size: 0.78rem !important; align-items: center; }
+    .pos-summary-card .summary-item input { width: 84px !important; height: 32px !important; padding: 0 4px !important; font-size: 13px !important; border-radius: 8px !important; }
+    .pos-summary-card hr { margin: 6px 0; }
+    .pos-summary-card .summary-total { font-size: 0.95rem !important; margin: 0.4rem 0 !important; }
+    .pos-actions { gap: 6px !important; margin-top: 6px !important; }
+    .pos-actions .btn { min-height: 36px !important; padding: 4px 6px !important; font-size: 0.76rem !important; border-radius: 10px !important; }
+    .pos-actions .btn i { font-size: 0.72rem; }
+}
+@media (max-width: 768px) { #pos-table th:nth-child(6) { font-size: 0 !important; } }

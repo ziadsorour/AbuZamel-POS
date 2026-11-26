@@ -5871,3 +5871,12 @@ function qsPay(mode) {
     new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(mark, 80); }).observe(document.documentElement, { childList: true, subtree: true });
     document.addEventListener('DOMContentLoaded', () => { mark(); apply(saved()); });
 })();
+
+// numbers: Latin digits (0-9) inside number inputs, regardless of the Arabic page language
+(function azLatinDigits() {
+    function fix() { document.querySelectorAll('input[type="number"]:not([lang])').forEach(i => i.setAttribute('lang', 'en')); }
+    let tm = null;
+    new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(fix, 50); }).observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', fix);
+    fix();
+})();

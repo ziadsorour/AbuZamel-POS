@@ -548,7 +548,7 @@ async function renderPOS() {
     const today = new Date().toLocaleDateString('en-CA');
     const isClosed = !!(await db.getById('dayClosures', today));
     contentArea.innerHTML = `
-        <div class="pos-wrapper">
+        <div class="pos-wrapper" id="pos-wrapper">
             <div class="pos-main">
                 <div class="card pos-billing-card">
                     ${isClosed ? `
@@ -657,6 +657,7 @@ async function renderPOS() {
     
     setupPOSListeners();
     renderRecentChips();
+    if (window.matchMedia('(max-width: 768px)').matches && !editingInvoiceId) azQuickPOS();
     await loadAgentsToSelect();
 
     if (editingInvoiceId && editingInvoiceData) {
@@ -861,6 +862,7 @@ function addToCart(product) {
         const r = recentIds().filter(id => String(id) !== String(product.id));
         r.unshift(product.id);
         localStorage.setItem('az_recent_products', JSON.stringify(r.slice(0, 12)));
+        const fq = JSON.parse(localStorage.getItem('az_freq') || '{}'); fq[product.id] = (fq[product.id] || 0) + 1; localStorage.setItem('az_freq', JSON.stringify(fq));
     } catch (e) {}
     const existing = cart.find(item => item.id === product.id && item.selectedUnit === (product.unit || 'قطعة'));
     let addedIndex = -1;
@@ -950,23 +952,24 @@ async function renderProducts() {
                             <label>اسم المنتج</label>
                             <input type="text" id="prod-name" required>
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>الباركود</label>
                             <input type="text" id="prod-barcode">
                         </div>
                         <div class="input-group">
                             <label>سعر الشراء</label>
-                            <input type="number" id="prod-purchase" step="0.01" value="0">
+                            <input type="number" inputmode="decimal" id="prod-purchase" step="0.01" value="0">
                         </div>
                         <div class="input-group">
                             <label>سعر البيع</label>
-                            <input type="number" id="prod-sale" step="0.01" value="0" required>
+                            <input type="number" inputmode="decimal" id="prod-sale" step="0.01" value="0" required>
                         </div>
                         <div class="input-group">
                             <label>المخزون الحالي</label>
-                            <input type="number" id="prod-stock" value="0">
+                            <input type="number" inputmode="numeric" id="prod-stock" value="0">
                         </div>
-                        <div class="input-group">
+                        <button type="button" class="pos-more-toggle prod-more-toggle" onclick="this.parentElement.classList.toggle('open')"><i class="fas fa-sliders"></i> تفاصيل أكتر (باركود / وحدة / حد الطلب)</button>
+                        <div class="input-group prod-extra">
                             <label>الوحدة الأساسية</label>
                             <select id="prod-unit">
                                 <option value="قطعة">قطعة</option>
@@ -975,11 +978,11 @@ async function renderProducts() {
                                 <option value="متر">متر</option>
                             </select>
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>عدد القطع في العلبة</label>
                             <input type="number" id="prod-pieces-per-box" value="1">
                         </div>
-                        <div class="input-group">
+                        <div class="input-group prod-extra">
                             <label>حد الطلب (الحد الأدنى)</label>
                             <input type="number" id="prod-min" value="5">
                         </div>
@@ -1181,6 +1184,7 @@ function renderCart() {
                 `;
     }).join('');
     calculateTotals();
+    if (typeof qsRender === 'function') qsRender();
 }
 
 function updatePrice(index, val) {
@@ -4493,6 +4497,26 @@ function showPaymentModal(type, entityId, editingPayment = null, forceDirection 
         </div>
     `;
     document.body.appendChild(modal);
+    if (window.matchMedia('(max-width: 768px)').matches) {
+        modal.classList.add('pay-phone');
+        const box = modal.firstElementChild;
+        const amt = document.getElementById('pay-amount');
+        const rows = box.querySelectorAll('div[style*="display: grid"] > div');
+        if (rows[1]) rows[1].classList.add('pay-extra');
+        if (rows[2]) rows[2].classList.add('pay-extra');
+        const ent = type === 'customer' ? state.cache.customers.find(c => String(c.id) === String(entityId)) : null;
+        const bal = ent ? Number(ent.balance) || 0 : 0;
+        const q = document.createElement('div');
+        q.className = 'pay-quick';
+        let html = '';
+        if (!editingPayment && bal > 0 && direction === 'in') {
+            html += `<div class="pay-bal">الدين: <b>${qsNum(bal)} ج</b></div><button type="button" class="pay-full" onclick="document.getElementById('pay-amount').value=${bal};">سداد كامل ${qsNum(bal)}</button>`;
+        }
+        html += `<button type="button" class="pay-more" onclick="this.closest('.pay-phone').classList.toggle('show-extra')">التاريخ والملاحظات</button>`;
+        q.innerHTML = html;
+        box.querySelector('div[style*="display: grid"]').before(q);
+        if (amt) { amt.setAttribute('inputmode', 'decimal'); amt.addEventListener('keydown', e => { if (e.key === 'Enter') box.querySelector('.btn-save').click(); }); setTimeout(() => amt.focus(), 80); }
+    }
 }
 
 async function deletePayment(type, id) {
@@ -5566,3 +5590,215 @@ async function azToggleUser(username, active) {
     }
     if (document.body) build(); else document.addEventListener('DOMContentLoaded', build);
 })();
+
+
+// ================= Phone quick-sale screen (tiles, one screen, two big pay buttons) =================
+function qsFreq() { try { return JSON.parse(localStorage.getItem('az_freq') || '{}'); } catch (e) { return {}; } }
+function qsRecentCustomers() { try { return JSON.parse(localStorage.getItem('az_recent_customers') || '[]'); } catch (e) { return []; } }
+function qsNum(n) { n = Number(n) || 0; return Math.abs(n - Math.round(n)) < 0.005 ? String(Math.round(n)) : n.toFixed(2); }
+
+function azQuickPOS() {
+    const wrap = document.getElementById('pos-wrapper');
+    if (!wrap) return;
+    wrap.classList.add('qs-on');
+    const box = document.createElement('div');
+    box.id = 'qs'; box.className = 'qs';
+    box.innerHTML = `
+        <div class="qs-cust-row" id="qs-cust-row"></div>
+        <div id="qs-cart" class="qs-cart"></div>
+        <div class="qs-find"><input id="qs-search" type="search" inputmode="search" autocomplete="off" placeholder="دوّر على منتج أو اسكان باركود..."></div>
+        <div id="qs-grid" class="qs-grid"></div>
+        <div class="qs-bar">
+            <div class="qs-total"><small>الإجمالي</small><b id="qs-total">0</b></div>
+            <button type="button" class="qs-btn qs-cash" onclick="qsPay('cash')"><i class="fas fa-money-bill-wave"></i> كاش</button>
+            <button type="button" class="qs-btn qs-credit" onclick="qsPay('credit')"><i class="fas fa-clock"></i> آجل</button>
+        </div>
+        <div id="qs-sheet" class="qs-sheet" style="display:none"></div>`;
+    wrap.prepend(box);
+    const inp = box.querySelector('#qs-search');
+    inp.addEventListener('input', () => qsGrid());
+    inp.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const q = inp.value.trim();
+        const p = state.cache.products.find(x => x.barcode && String(x.barcode) === q);
+        if (p) { addToCart(p); inp.value = ''; qsGrid(); }
+    });
+    qsCustomers(); qsGrid(); qsRender();
+}
+
+function qsCustomers() {
+    const row = document.getElementById('qs-cust-row');
+    if (!row) return;
+    const byId = new Map(state.cache.customers.map(c => [String(c.id), c]));
+    const recents = qsRecentCustomers().map(id => byId.get(String(id))).filter(Boolean).slice(0, 3);
+    const sel = selectedCustomer ? String(selectedCustomer.id) : null;
+    const typed = !selectedCustomer && (document.getElementById('pos-customer-name') || {}).value;
+    let html = `<button type="button" class="qs-chip ${!sel && !typed ? 'on' : ''}" onclick="qsPickCash()"><i class="fas fa-money-bill"></i> نقدي</button>`;
+    const list = recents.slice();
+    if (selectedCustomer && !list.find(c => String(c.id) === sel)) list.unshift(selectedCustomer);
+    list.slice(0, 3).forEach(c => {
+        html += `<button type="button" class="qs-chip ${String(c.id) === sel ? 'on' : ''}" onclick="qsPickCustomer('${String(c.id).replace(/'/g, '')}')">${esc(c.name)}</button>`;
+    });
+    if (typed) html += `<button type="button" class="qs-chip on">${esc(typed)}</button>`;
+    html += `<button type="button" class="qs-chip qs-chip-more" onclick="qsCustomerSheet()"><i class="fas fa-user-plus"></i> عميل آخر</button>`;
+    row.innerHTML = html;
+}
+
+function qsPickCash() {
+    selectedCustomer = null;
+    ['pos-customer-name', 'pos-customer-phone', 'pos-customer-address'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+    const br = document.getElementById('pos-prev-balance-row'); if (br) br.style.display = 'none';
+    const be = document.getElementById('pos-prev-balance'); if (be) be.innerText = '0.00';
+    calculateTotals(); qsCustomers(); qsCloseSheet();
+}
+function qsPickCustomer(id, then) {
+    const c = state.cache.customers.find(x => String(x.id) === String(id));
+    if (!c) return;
+    selectResult('customer', c);
+    try {
+        const r = qsRecentCustomers().filter(x => String(x) !== String(c.id)); r.unshift(c.id);
+        localStorage.setItem('az_recent_customers', JSON.stringify(r.slice(0, 8)));
+    } catch (e) {}
+    qsCustomers(); qsCloseSheet();
+    if (then) qsPay(then);
+}
+function qsCloseSheet() { const sh = document.getElementById('qs-sheet'); if (sh) { sh.style.display = 'none'; sh.innerHTML = ''; } }
+function qsOpenSheet(html) {
+    const sh = document.getElementById('qs-sheet');
+    sh.innerHTML = '<div class="qs-backdrop" onclick="qsCloseSheet()"></div><div class="qs-panel">' + html + '</div>';
+    sh.style.display = 'block';
+}
+
+function qsCustomerSheet(then) {
+    qsOpenSheet(`
+        <h3>اختار العميل</h3>
+        <input id="qs-cs-input" type="search" class="qs-big-input" placeholder="اكتب اسم العميل أو رقمه..." autocomplete="off">
+        <div id="qs-cs-list" class="qs-cs-list"></div>`);
+    const inp = document.getElementById('qs-cs-input');
+    const draw = () => {
+        const q = inp.value.trim().toLowerCase();
+        const all = state.cache.customers;
+        let list;
+        if (q) list = all.filter(c => (c.name || '').toLowerCase().includes(q) || (c.phone && String(c.phone).includes(q))).slice(0, 15);
+        else {
+            const byId = new Map(all.map(c => [String(c.id), c]));
+            list = qsRecentCustomers().map(id => byId.get(String(id))).filter(Boolean);
+            all.forEach(c => { if (list.length < 10 && !list.includes(c)) list.push(c); });
+        }
+        let html = list.map(c => `<button type="button" class="qs-row" onclick="qsPickCustomer('${String(c.id).replace(/'/g, '')}', ${then ? `'${then}'` : 'null'})"><span>${esc(c.name)}</span><small class="${c.balance > 0 ? 'debt' : ''}">${c.balance > 0 ? 'عليه ' + qsNum(c.balance) : esc(c.phone || '')}</small></button>`).join('');
+        if (q && !all.find(c => (c.name || '').toLowerCase() === q)) html += `<button type="button" class="qs-row qs-new" data-name="${esc(inp.value.trim())}" onclick="qsNewCustomer(this.dataset.name, ${then ? `'${then}'` : 'null'})"><span>+ عميل جديد: ${esc(inp.value.trim())}</span></button>`;
+        document.getElementById('qs-cs-list').innerHTML = html;
+    };
+    inp.addEventListener('input', draw); draw();
+    setTimeout(() => inp.focus(), 50);
+}
+function qsNewCustomer(name, then) {
+    selectedCustomer = null;
+    document.getElementById('pos-customer-name').value = name;
+    document.getElementById('pos-customer-phone').value = '';
+    document.getElementById('pos-customer-address').value = '';
+    const br = document.getElementById('pos-prev-balance-row'); if (br) br.style.display = 'none';
+    document.getElementById('pos-prev-balance').innerText = '0.00';
+    calculateTotals(); qsCustomers(); qsCloseSheet();
+    if (then) qsPay(then);
+}
+
+function qsGrid() {
+    const grid = document.getElementById('qs-grid');
+    if (!grid) return;
+    const q = ((document.getElementById('qs-search') || {}).value || '').trim().toLowerCase();
+    const fq = qsFreq();
+    let list;
+    if (q) {
+        const a = [], b = [];
+        for (const p of state.cache.products) {
+            const n = (p.name || '').toLowerCase();
+            if (n.startsWith(q)) a.push(p); else if (n.includes(q) || (p.barcode && String(p.barcode).includes(q))) b.push(p);
+            if (a.length + b.length >= 30) break;
+        }
+        list = a.concat(b);
+    } else {
+        list = state.cache.products.slice().sort((x, y) => (fq[y.id] || 0) - (fq[x.id] || 0)).slice(0, 12);
+    }
+    grid.innerHTML = list.length ? list.map(p => {
+        const inCart = cart.filter(i => String(i.id) === String(p.id)).reduce((s, i) => s + i.qty, 0);
+        return `<button type="button" class="qs-tile ${p.stock <= 0 ? 'out' : ''}" onclick="qsAdd('${String(p.id).replace(/'/g, '')}')">${inCart ? `<span class="qs-badge">${inCart}</span>` : ''}<span class="qs-tn">${esc(p.name)}</span><span class="qs-tp">${qsNum(p.salePrice)} ج</span></button>`;
+    }).join('') : '<div class="qs-empty">مفيش منتج بالاسم ده</div>';
+}
+function qsAdd(id) {
+    const p = state.cache.products.find(x => String(x.id) === String(id));
+    if (p) addToCart(p);
+}
+
+function qsRender() {
+    const c = document.getElementById('qs-cart');
+    if (!c) return;
+    c.innerHTML = cart.length ? cart.map((it, i) => {
+        const changed = it.originalPrice != null && Math.abs(it.actualPrice - it.originalPrice) > 0.004;
+        return `<div class="qs-line" data-i="${i}">
+            <div class="ql-name">${esc(it.name)}${it.selectedUnit === 'علبة' ? ' <small>(علبة)</small>' : ''}</div>
+            <button type="button" class="ql-price ${changed ? 'changed' : ''}" onclick="qsEditPrice(${i})">${qsNum(it.actualPrice)} ج <i class="fas fa-pen"></i></button>
+            <div class="ql-qty"><button type="button" onclick="qsStep(${i}, -1)">${it.qty <= 1 ? '<i class="fas fa-trash"></i>' : '&minus;'}</button><b>${it.qty}</b><button type="button" onclick="qsStep(${i}, 1)">+</button></div>
+            <div class="ql-total">${qsNum(it.actualPrice * it.qty)}</div>
+        </div>`;
+    }).join('') : '<div class="qs-hint">اضغط على المنتج عشان يتضاف</div>';
+    const t = cart.reduce((s, it) => s + it.actualPrice * it.qty, 0);
+    const el = document.getElementById('qs-total'); if (el) el.textContent = qsNum(t);
+    qsGrid();
+    // swipe a line sideways to remove it
+    c.querySelectorAll('.qs-line').forEach(line => {
+        let x0 = null;
+        line.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+        line.addEventListener('touchend', e => {
+            if (x0 === null) return;
+            const dx = e.changedTouches[0].clientX - x0; x0 = null;
+            if (Math.abs(dx) > 90) removeFromCart(+line.dataset.i);
+        });
+    });
+}
+function qsStep(i, d) {
+    if (!cart[i]) return;
+    if (cart[i].qty + d < 1) { removeFromCart(i); return; }
+    cart[i].qty += d; renderCart();
+}
+function qsEditPrice(i) {
+    const it = cart[i]; if (!it) return;
+    qsOpenSheet(`
+        <h3>${esc(it.name)}</h3>
+        <div class="qs-sub">السعر الأصلي: ${qsNum(it.originalPrice != null ? it.originalPrice : it.actualPrice)} ج</div>
+        <input id="qs-price-input" type="number" inputmode="decimal" class="qs-big-input qs-num" value="${it.actualPrice}">
+        <button type="button" class="qs-ok" onclick="qsSetPrice(${i})">تم</button>`);
+    const inp = document.getElementById('qs-price-input');
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') qsSetPrice(i); });
+    setTimeout(() => { inp.focus(); inp.select(); }, 60);
+}
+function qsSetPrice(i) {
+    const v = parseFloat(document.getElementById('qs-price-input').value);
+    if (!isNaN(v) && v >= 0 && cart[i]) { cart[i].actualPrice = v; }
+    qsCloseSheet(); renderCart();
+}
+
+function qsPay(mode) {
+    if (!cart.length) return showToast('اختار منتج الأول', 'warning');
+    const hasCust = !!selectedCustomer || !!document.getElementById('pos-customer-name').value.trim();
+    if (mode === 'credit' && !hasCust) { qsCustomerSheet('credit'); return; }
+    const sub = cart.reduce((s, it) => s + it.actualPrice * it.qty, 0);
+    const prev = parseFloat(document.getElementById('pos-prev-balance').innerText) || 0;
+    const name = (selectedCustomer && selectedCustomer.name) || document.getElementById('pos-customer-name').value.trim();
+    qsOpenSheet(`
+        <h3>${mode === 'cash' ? 'بيع كاش' : 'بيع آجل'}${name ? ' - ' + esc(name) : ''}</h3>
+        <div class="qs-sum"><span>${cart.reduce((s, it) => s + it.qty, 0)} قطعة / ${cart.length} صنف</span><b>${qsNum(sub)} ج</b></div>
+        ${mode === 'credit' && prev > 0 ? `<div class="qs-sub">حسابه السابق ${qsNum(prev)} ج، هيبقى ${qsNum(prev + sub)} ج</div>` : ''}
+        ${mode === 'credit' ? `<div class="qs-part"><label>دفع جزء دلوقتي؟</label><input id="qs-part" type="number" inputmode="decimal" placeholder="0"></div>` : ''}
+        <button type="button" class="qs-ok ${mode}" id="qs-confirm">${mode === 'cash' ? 'تأكيد وحفظ (كاش)' : 'تأكيد وحفظ (آجل)'}</button>
+        <button type="button" class="qs-cancel" onclick="qsCloseSheet()">رجوع</button>`);
+    document.getElementById('qs-confirm').onclick = async () => {
+        let paid = mode === 'cash' ? sub : 0;
+        const part = document.getElementById('qs-part');
+        if (part && parseFloat(part.value) > 0) paid = Math.min(sub, parseFloat(part.value));
+        document.getElementById('pos-paid-amount').value = paid.toFixed(2);
+        calculateTotals();
+        qsCloseSheet();
+        await handleSaveInvoice(false);
+    };
+}

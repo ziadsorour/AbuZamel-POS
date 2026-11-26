@@ -5803,24 +5803,40 @@ function qsPay(mode) {
     };
 }
 
-// Calm phone look: hide secondary export buttons, start in the light theme
+// Calm phone look: hide secondary export buttons; light by default, night button saved across reloads
 (function azCalm() {
     if (!window.matchMedia || !window.matchMedia('(max-width: 768px)').matches) return;
-    try { if (typeof state !== 'undefined' && state.theme === 'dark') { state.theme = 'light'; } } catch (e) {}
-    const sw = () => { if (document.body && document.body.classList.contains('dark-mode') && !window._azThemeTouched) document.body.className = 'light-mode'; };
-    document.addEventListener('DOMContentLoaded', sw); sw();
-    document.addEventListener('click', e => { if (e.target.closest && e.target.closest('#theme-toggle')) window._azThemeTouched = true; }, true);
+    const saved = () => { try { return localStorage.getItem('az_theme') === 'light' ? 'light' : 'dark'; } catch (e) { return 'light'; } };
+    function apply(th) {
+        const b = document.body; if (!b) return;
+        b.classList.remove('dark-mode', 'light-mode'); b.classList.add(th + '-mode');
+        try { state.theme = th; } catch (e) {}
+        const btn = document.getElementById('az-night');
+        if (btn) btn.innerHTML = th === 'dark' ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
+        const t = document.getElementById('theme-toggle');
+        if (t) { const i = t.querySelector('i'), sp = t.querySelector('span'); if (i) i.className = th === 'dark' ? 'fas fa-sun' : 'fas fa-moon'; if (sp) sp.innerText = th === 'dark' ? 'الوضع المضيء' : 'الوضع الليلي'; }
+    }
+    function toggle(e) {
+        if (e) { e.preventDefault(); e.stopImmediatePropagation(); }
+        const th = document.body.classList.contains('dark-mode') ? 'light' : 'dark';
+        try { localStorage.setItem('az_theme', th); } catch (x) {}
+        apply(th);
+    }
+    function build() {
+        const bar = document.querySelector('.top-bar'); if (!bar || document.getElementById('az-night')) return;
+        const b = document.createElement('button'); b.id = 'az-night'; b.type = 'button'; b.setAttribute('aria-label', 'الوضع الليلي');
+        b.addEventListener('click', toggle); bar.insertBefore(b, bar.firstChild);
+        apply(saved());
+    }
     function mark() {
+        build();
         document.querySelectorAll('.page-header button, .page-header .btn, .table-actions button').forEach(b => {
             if (/تصدير|استيراد|Excel|إكسل/.test(b.textContent) && !b.classList.contains('az-secondary')) b.classList.add('az-secondary');
         });
-        const t = document.getElementById('theme-toggle');
-        if (t && !t._azc && typeof state !== 'undefined' && state.theme === 'light') {
-            t._azc = 1; const i = t.querySelector('i'), s = t.querySelector('span');
-            if (i) i.className = 'fas fa-moon'; if (s) s.innerText = 'الوضع الليلي';
-        }
     }
+    document.addEventListener('click', e => { const t = e.target.closest && e.target.closest('#theme-toggle'); if (t) toggle(e); }, true);
+    apply(saved());
     let tm = null;
     new MutationObserver(() => { clearTimeout(tm); tm = setTimeout(mark, 80); }).observe(document.documentElement, { childList: true, subtree: true });
-    document.addEventListener('DOMContentLoaded', mark);
+    document.addEventListener('DOMContentLoaded', () => { mark(); apply(saved()); });
 })();

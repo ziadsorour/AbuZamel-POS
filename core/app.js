@@ -1287,11 +1287,6 @@ async function handleSaveInvoice(print = false) {
         showToast('السلة فارغة!', 'warning');
         return;
     }
-    if (db.isRemote) {
-        // fail fast, before anything is written, when the phone has no internet
-        try { await db.rpc('az_me', {}, { retry: false }); }
-        catch (e) { showToast('مفيش اتصال بالإنترنت. الفاتورة لم تُحفظ، جرب تاني لما النت يرجع.', 'error', 5000); return; }
-    }
     isSavingInvoice = true;
 
     try {
@@ -5375,10 +5370,31 @@ function azSetupOnlineBanner() {
     if (!bar) {
         bar = document.createElement('div');
         bar.id = 'offline-banner';
-        bar.textContent = 'مفيش اتصال بالإنترنت. لازم النت يكون شغال عشان تحفظ أي فاتورة.';
+        bar.addEventListener('click', () => {
+            const f = db.failed || [];
+            if (f.length) {
+                const lines = f.map(o => '• ' + (o.store || '') + ' ' + (o.data && o.data.id ? '#' + o.data.id : '') + ': ' + o.failed);
+                alert('عمليات ما اتحفظتش على السيرفر:\n' + lines.join('\n'));
+            }
+        });
         document.body.appendChild(bar);
     }
-    const update = () => { bar.style.display = navigator.onLine ? 'none' : 'block'; };
+    let st = { offline: false, pending: 0, failed: 0, syncing: false };
+    const update = () => {
+        const off = !navigator.onLine || st.offline;
+        let txt = '', cls = '';
+        if (st.failed) { txt = 'فيه ' + st.failed + ' عملية ما اتحفظتش على السيرفر. اضغط هنا للتفاصيل'; cls = 'fail'; }
+        else if (off) { txt = 'أوفلاين: شغال على الجهاز' + (st.pending ? '، ' + st.pending + ' عملية مستنية النت' : '') + '. هتتحفظ لوحدها لما النت يرجع'; cls = 'off'; }
+        else if (st.syncing || st.pending) { txt = 'جاري حفظ ' + st.pending + ' عملية على السيرفر...'; cls = 'sync'; }
+        bar.className = cls;
+        bar.textContent = txt;
+        bar.style.display = txt ? 'block' : 'none';
+    };
+    window.addEventListener('az-sync', (e) => { st = Object.assign(st, e.detail); update(); });
+    window.addEventListener('az-synced', async (e) => {
+        try { if (typeof refreshGlobalCache === 'function') await refreshGlobalCache(); } catch (x) {}
+        showToast('اتحفظ ' + e.detail.done + ' عملية على السيرفر', 'success', 4000);
+    });
     window.addEventListener('online', update);
     window.addEventListener('offline', update);
     update();
